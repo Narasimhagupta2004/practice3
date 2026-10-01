@@ -1,0 +1,1120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>The Trials of Ravana · Astrolive (Dussehra)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Yatra+One&family=Baloo+2:wght@400;600;800&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --dusk:#1a0f2e; --ink:#0f0820;
+    box-sizing:border-box;
+    padding-top:env(safe-area-inset-top,0px);
+    padding-bottom:env(safe-area-inset-bottom,0px);
+    background:var(--ink);
+  }
+  @media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){ --ink:#0f0820; } }
+  :root[data-theme="dark"]{ --ink:#0f0820; }
+  html{height:100%;scroll-padding-top:env(safe-area-inset-top,0px)}
+  body{margin:0;height:100%;background:var(--ink);overflow:hidden;touch-action:none;-webkit-user-select:none;user-select:none}
+  #game{width:100%;height:100%}
+  #loading{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;color:#f6a623;font-family:'Baloo 2',system-ui,sans-serif;font-size:18px}
+</style>
+</head>
+<body>
+<div id="loading">Lighting the diyas…</div>
+<div id="game"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/phaser/3.80.1/phaser.min.js"></script>
+<script>
+/* =========================================================
+   THE 10 TRIALS OF DUSSEHRA — Prototype v0.1
+   Flow: Splash → Story → Shami Tree (hub) → Trial of Courage → Reward → Tree grows
+   ========================================================= */
+const W = 390, H = 780;
+const DPR = Math.min(window.devicePixelRatio || 1, 3);
+const C = { marigold:0xf6a623, vermilion:0xe2582b, leaf:0x4f9a3a, leafDark:0x2f6b2a, kumkum:0xb3123d, ivory:0xfff3d6, dusk:0x1a0f2e };
+const FONT_D = "'Yatra One', Georgia, serif";
+const FONT_B = "'Baloo 2', system-ui, sans-serif";
+
+/* ---------- Trial data (structured so trials 2–10 slot in later) ---------- */
+const TRIALS = [
+  { id:1, key:'courage',       title:'Forest of Courage',     loc:'Forest',        value:'Courage',       icon:'flame'  },
+  { id:2, key:'wisdom',        title:'Temple of Wisdom',      loc:'Ancient Temple',value:'Wisdom',        icon:'lotus'  },
+  { id:3, key:'unity',         title:'The Vanara Bridge',     loc:'Ocean',         value:'Unity',         icon:'bridge' },
+  { id:4, key:'righteousness', title:'The Two Paths',         loc:'Lanka',         value:'Righteousness', icon:'wheel'  },
+  { id:5, key:'ravana',        title:'Ravana\u2019s Fortress', loc:'Lanka Fortress',value:'Victory',      icon:'bow'    },
+];
+const TOTAL=TRIALS.length; const headsDown=n=>Math.min(10,n*2);
+const BUILT = TRIALS.map(t=>t.key);
+const TREE_STAGES = ['Seedling','Small plant','Young tree','Large Shami tree','Glowing sacred tree'];
+const LEVELS = ['Seeker','Brave','Explorer','Guardian','Champion'];
+const stageFor = n => n===0?0 : n===1?1 : n===2?2 : n<=9?3 : 4;
+
+/* ---------- Save (per-device) ---------- */
+const SAVE_KEY = 'astrolive_ten_trials_v1';
+function loadSave(){ try{ const s = JSON.parse(localStorage.getItem(SAVE_KEY)); if (s && Array.isArray(s.tokens)){ if(!s.bests){ s.bests={}; if(s.best) s.bests.courage=s.best; } return s; } }catch(e){} return { tokens:[], bests:{}, seenIntro:false }; }
+function save(){ try{ localStorage.setItem(SAVE_KEY, JSON.stringify(STATE)); }catch(e){} }
+let STATE = loadSave();
+STATE.bests=STATE.bests||{}; STATE.attempts=STATE.attempts||{}; STATE.points=STATE.points||0; STATE.claimed=STATE.claimed||{};
+if(STATE.tokens.length&&STATE.seenIntro&&STATE.started===undefined) STATE.started=true;
+
+/* ---------- Campaign config: the host app can override any of this via window.DUSSEHRA_CONFIG ---------- */
+const CONFIG=Object.assign({
+  brand:'Astrolive',
+  milestones:{
+    1:{ id:'dus_t1', title:'Participation reward', detail:'10 Astrocash added to your wallet' },
+    3:{ id:'dus_t3', title:'Halfway bonus',        detail:'25 bonus Astrocash' },
+  },
+  finalReward:{ id:'dus_t5', title:'Dussehra Champion Reward', detail:'100 Astrocash + a free 5-minute consultation', code:'DUSSEHRA100' },
+}, window.DUSSEHRA_CONFIG||{});
+
+/* ---------- Analytics + host-app bridge (window.AstroliveBridge, or a React Native WebView) ---------- */
+const EVENTS=[];
+function track(name,props={}){
+  const e={event:name,...props,ts:Date.now()}; EVENTS.push(e); if(EVENTS.length>80) EVENTS.shift();
+  try{ (window.dataLayer=window.dataLayer||[]).push(e); }catch(_){}
+  try{ window.AstroliveBridge&&window.AstroliveBridge.track&&window.AstroliveBridge.track(name,props); }catch(_){}
+  try{ window.ReactNativeWebView&&window.ReactNativeWebView.postMessage(JSON.stringify({type:'track',...e})); }catch(_){}
+}
+function bridge(action,payload={}){
+  try{ if(window.AstroliveBridge&&typeof window.AstroliveBridge[action]==='function'){ window.AstroliveBridge[action](payload); return true; } }catch(_){}
+  try{ if(window.ReactNativeWebView){ window.ReactNativeWebView.postMessage(JSON.stringify({type:action,...payload})); return true; } }catch(_){}
+  return false;
+}
+function trackFail(sceneKey){ const t=TRIALS.find(x=>x.scene===sceneKey); if(!t) return; track('dussehra_trial_failed',{trial_number:t.id,trial:t.key,attempt_count:STATE.attempts[t.key]||1}); STATE.attempts[t.key]=(STATE.attempts[t.key]||1)+1; save(); }
+function heroLook(){ return {col:(STATE.hero&&STATE.hero.col)||C.marigold,hair:0x2a1608}; }
+function heroName(){ return (STATE.hero&&STATE.hero.name)||'Hero'; }
+
+/* ---------- Tiny synth (no audio files needed) ---------- */
+let AC = null;
+function ac(){ if(!AC){ try{ AC = new (window.AudioContext||window.webkitAudioContext)(); }catch(e){} } if(AC && AC.state==='suspended') AC.resume(); return AC; }
+function tone(f,d,type='sine',v=0.12,when=0){ const a=ac(); if(!a) return; const o=a.createOscillator(), g=a.createGain(); o.type=type; o.frequency.value=f; const t=a.currentTime+when; g.gain.setValueAtTime(0.0001,t); g.gain.exponentialRampToValueAtTime(v,t+0.01); g.gain.exponentialRampToValueAtTime(0.0001,t+d); o.connect(g).connect(a.destination); o.start(t); o.stop(t+d+0.05); }
+function sfx(n){
+  switch(n){
+    case 'tap':  tone(660,0.08,'triangle',0.07); break;
+    case 'orb':  tone(1046,0.1,'sine',0.09); tone(1568,0.12,'sine',0.06,0.05); break;
+    case 'jump': tone(420,0.12,'triangle',0.07); tone(640,0.1,'triangle',0.05,0.06); break;
+    case 'duck': tone(300,0.1,'triangle',0.06); break;
+    case 'hit':  tone(110,0.3,'sawtooth',0.13); break;
+    case 'bell': [880,1320].forEach((f,i)=>tone(f,1.2,'sine',0.08,i*0.02)); break;
+    case 'win':  [523,659,784,1046].forEach((f,i)=>tone(f,0.35,'triangle',0.1,i*0.12)); break;
+    case 'head': tone(196,0.6,'square',0.06); tone(98,0.7,'sawtooth',0.07,0.1); break;
+    case 'grow': [392,523,659,784,988].forEach((f,i)=>tone(f,0.3,'sine',0.09,i*0.09)); break;
+    case 'count':tone(520,0.12,'triangle',0.08); break;
+    case 'go':   tone(780,0.25,'triangle',0.1); break;
+  }
+}
+
+/* ---------- Drawing helpers ---------- */
+function txt(s,x,y,str,size,o={}){
+  const style = { fontFamily:o.display?FONT_D:FONT_B, fontSize:size+'px', color:o.color||'#fff3d6', align:o.align||'center', resolution:DPR };
+  if (o.bold) style.fontStyle = 'bold';
+  if (o.wrap) style.wordWrap = { width:o.wrap, useAdvancedWrap:true };
+  if (o.stroke) { style.stroke = o.stroke; style.strokeThickness = o.strokeW||4; }
+  if (o.lineSpacing) style.lineSpacing = o.lineSpacing;
+  return s.add.text(x,y,str,style).setOrigin(o.ox??0.5, o.oy??0.5);
+}
+function gradTex(s,key,stops){
+  if (s.textures.exists(key)) return;
+  const t = s.textures.createCanvas(key,W,H), ctx = t.getContext(), g = ctx.createLinearGradient(0,0,0,H);
+  stops.forEach(([o,c])=>g.addColorStop(o,c)); ctx.fillStyle=g; ctx.fillRect(0,0,W,H); t.refresh();
+}
+function stars(s,n,maxY){ for(let i=0;i<n;i++){ const d=s.add.image(Math.random()*W, Math.random()*maxY,'spark').setAlpha(0.2+Math.random()*0.6).setScale(0.3+Math.random()*0.5); s.tweens.add({targets:d,alpha:0.1,duration:800+Math.random()*2000,yoyo:true,repeat:-1,delay:Math.random()*1500}); } }
+function stringLights(s,y0,sag){
+  const cols=[0xffd166,0xff6b6b,0x7bdff2,0xf7aef8,0xb9fbc0];
+  const g=s.add.graphics(); g.lineStyle(1,0x000000,0.6); g.beginPath();
+  for(let i=0;i<=40;i++){ const t=i/40, x=t*W, y=y0+Math.sin(t*Math.PI)*sag; i?g.lineTo(x,y):g.moveTo(x,y); } g.strokePath();
+  for(let i=1;i<16;i++){ const t=i/16, x=t*W, y=y0+Math.sin(t*Math.PI)*sag+3;
+    const d=s.add.image(x,y,'dot').setScale(0.32).setTint(cols[i%5]).setBlendMode('ADD');
+    s.add.image(x,y,'glow').setScale(0.18).setTint(cols[i%5]).setAlpha(0.5).setBlendMode('ADD');
+    s.tweens.add({targets:d,alpha:0.35,duration:500+Math.random()*900,yoyo:true,repeat:-1,delay:Math.random()*800}); }
+}
+function diya(s,x,y,sc=1){
+  s.add.image(x,y-8*sc,'glow').setScale(0.55*sc).setTint(0xff9a2e).setAlpha(0.45).setBlendMode('ADD');
+  const g=s.add.graphics(); g.fillStyle(0x9a3412,1); g.fillEllipse(x,y,26*sc,10*sc); g.fillStyle(0xc2410c,1); g.fillEllipse(x,y-3*sc,26*sc,6*sc);
+  const f=s.add.image(x,y-10*sc,'dot').setTint(0xffc14d).setScale(0.32*sc,0.6*sc).setBlendMode('ADD');
+  s.tweens.add({targets:f,scaleY:0.45*sc,scaleX:0.26*sc,duration:180+Math.random()*200,yoyo:true,repeat:-1});
+}
+function rangoli(s,x,y,r){
+  const g=s.add.graphics(); const cols=[0xe2582b,0xf6a623,0xb3123d,0x7bdff2];
+  for(let k=3;k>=0;k--){ g.fillStyle(cols[k],0.85); for(let i=0;i<8;i++){ const a=i/8*Math.PI*2; g.fillEllipse(x+Math.cos(a)*r*(k+1)/4, y+Math.sin(a)*r*0.38*(k+1)/4, r*0.5*(k+1)/4, r*0.2*(k+1)/4); } }
+  g.fillStyle(0xfff3d6,1); g.fillEllipse(x,y,10,5);
+}
+
+/* Shami tree — the hub and the progression meter */
+function drawTree(s,x,y,stage,o={}){
+  const c=s.add.container(x,y);
+  if (o.glow || stage===4){ const gl=s.add.image(0,-110,'glow').setScale(3.4).setTint(0xffd36b).setAlpha(0.35).setBlendMode('ADD'); c.add(gl); s.tweens.add({targets:gl,alpha:0.6,scale:3.8,duration:1400,yoyo:true,repeat:-1}); c.glow=gl; }
+  const g=s.add.graphics(); c.add(g);
+  g.fillStyle(0x3b2a1a,1); g.fillEllipse(0,4,150,22);
+  if (stage===0){
+    g.lineStyle(5,0x6b8f3a,1); g.beginPath(); g.moveTo(0,0); g.lineTo(0,-36); g.strokePath();
+    g.fillStyle(0x8cc04b,1); g.fillEllipse(-13,-38,26,11); g.fillEllipse(13,-45,26,11);
+    return c;
+  }
+  const s0=[0,0.6,0.8,1,1.1][stage], th=[0,55,85,115,135][stage], top=-th;
+  g.fillStyle(0x5a3a22,1); g.fillPoints([{x:-13*s0,y:0},{x:13*s0,y:0},{x:5*s0,y:top},{x:-5*s0,y:top}],true);
+  const blobs=[[0,0,1],[-38,10,0.8],[38,10,0.8],[-22,-26,0.75],[22,-26,0.75],[0,-42,0.65],[-58,28,0.55],[58,28,0.55]];
+  const n=[0,4,6,8,8][stage];
+  if (stage>=2){ g.lineStyle(5*s0,0x5a3a22,1); blobs.slice(1,n).forEach(([bx,by])=>{ g.beginPath(); g.moveTo(0,top+20); g.lineTo(bx*s0*0.8,top+by*s0*0.8); g.strokePath(); }); }
+  blobs.slice(0,n).forEach(([bx,by,r])=>{ g.fillStyle(C.leafDark,1); g.fillCircle(bx*s0,top+by*s0,34*r*s0); });
+  blobs.slice(0,n).forEach(([bx,by,r])=>{ g.fillStyle(C.leaf,1); g.fillCircle(bx*s0-6*s0,top+by*s0-8*s0,22*r*s0); });
+  if (stage>=3){ const pts=[[-30,-10],[25,-30],[40,12],[-12,-48],[5,8],[-50,22],[55,30],[-20,20]]; pts.forEach(([px,py])=>{ g.fillStyle(0xffe08a,1); g.fillCircle(px*s0,top+py*s0,2.5); }); }
+  if (o.lights){ const lp=[[-30,-5],[28,-20],[0,-40],[-45,25],[45,22],[-15,15],[18,8],[-28,-30],[35,-2],[0,5]];
+    lp.slice(0,o.lights).forEach(([px,py],i)=>{ const gl=s.add.image(px*s0,top+py*s0,'glow').setScale(0.22).setTint(0xffd36b).setBlendMode('ADD'); const d=s.add.image(px*s0,top+py*s0,'dot').setScale(0.28).setTint(0xfff1a8); c.add([gl,d]); s.tweens.add({targets:gl,alpha:0.4,duration:700+i*90,yoyo:true,repeat:-1}); }); }
+  return c;
+}
+
+/* Ravana silhouette with ten removable heads */
+function drawRavana(s,x,y,remaining,o={}){
+  const col=o.color??0x1b0e24, eye=o.eye??0xff3b3b;
+  const c=s.add.container(x,y);
+  const heads=[];
+  for(let i=0;i<10;i++){
+    const off=i-4.5, hx=off*17, hy=-100-(4.5-Math.abs(off))*3;
+    const big=(i===4||i===5)?1.15:1;
+    const h=s.add.container(hx,hy), hg=s.add.graphics();
+    hg.fillStyle(col,1); hg.fillCircle(0,0,10*big); hg.fillTriangle(-7*big,-6*big,7*big,-6*big,0,-20*big);
+    hg.fillStyle(eye,1); hg.fillCircle(-3.5,0,1.8); hg.fillCircle(3.5,0,1.8);
+    h.add(hg); c.add(h); heads.push(h);
+  }
+  const b=s.add.graphics(); b.fillStyle(col,1);
+  b.fillPoints([{x:-40,y:0},{x:40,y:0},{x:28,y:-88},{x:-28,y:-88}],true);
+  b.fillRect(-32,0,24,62); b.fillRect(8,0,24,62);
+  b.fillPoints([{x:-28,y:-86},{x:-72,y:-36},{x:-60,y:-26},{x:-24,y:-62}],true);
+  b.fillPoints([{x:28,y:-86},{x:72,y:-36},{x:60,y:-26},{x:24,y:-62}],true);
+  b.fillRect(64,-96,5,72);
+  c.add(b);
+  const order=[9,0,8,1,7,2,6,3,5,4];
+  order.slice(0,10-remaining).forEach(i=>heads[i].setVisible(false));
+  return { c, heads, order };
+}
+
+function button(s,x,y,w,h,label,cb,o={}){
+  const c=s.add.container(x,y), bg=s.add.graphics(), col=o.color??C.marigold;
+  bg.fillStyle(0x000000,0.35); bg.fillRoundedRect(-w/2,-h/2+4,w,h,h/2);
+  bg.fillStyle(col,1); bg.fillRoundedRect(-w/2,-h/2,w,h,h/2);
+  bg.fillStyle(0xffffff,0.18); bg.fillRoundedRect(-w/2+6,-h/2+3,w-12,h*0.38,h*0.2);
+  const t=txt(s,0,0,label,o.size||20,{bold:true,color:o.text||'#2a1206'});
+  c.add([bg,t]); c.setSize(w,h); c.setInteractive({useHandCursor:true});
+  c.on('pointerdown',()=>{ ac(); sfx('tap'); s.tweens.add({targets:c,scale:0.94,duration:70,yoyo:true}); cb(); });
+  c.label=t; return c;
+}
+function toast(s,msg){
+  if (s._toast) s._toast.destroy();
+  const c=s.add.container(W/2,H-110).setDepth(100).setScrollFactor(0);
+  const t=txt(s,0,0,msg,15,{wrap:300,color:'#fff3d6'});
+  const bg=s.add.graphics(); bg.fillStyle(0x000000,0.75); bg.fillRoundedRect(-t.width/2-16,-t.height/2-10,t.width+32,t.height+20,14);
+  c.add([bg,t]); c.setAlpha(0); s._toast=c;
+  s.tweens.add({targets:c,alpha:1,y:H-125,duration:200});
+  s.time.delayedCall(2000,()=>{ if(c.active) s.tweens.add({targets:c,alpha:0,duration:250,onComplete:()=>c.destroy()}); });
+}
+function goTo(s,key,data){ s.cameras.main.fadeOut(300,15,8,32); s.cameras.main.once('camerafadeoutcomplete',()=>s.scene.start(key,data)); }
+
+/* =========================================================
+   SCENES
+   ========================================================= */
+class Boot extends Phaser.Scene{
+  constructor(){ super('Boot'); }
+  create(){
+    const g=this.add.graphics();
+    g.fillStyle(0xffffff,1); g.fillCircle(8,8,8); g.generateTexture('dot',16,16); g.clear();
+    g.fillStyle(0xffffff,1); g.fillCircle(3,3,3); g.generateTexture('spark',6,6); g.destroy();
+    const t=this.textures.createCanvas('glow',128,128), ctx=t.getContext(), rg=ctx.createRadialGradient(64,64,0,64,64,64);
+    rg.addColorStop(0,'rgba(255,255,255,1)'); rg.addColorStop(0.35,'rgba(255,255,255,0.35)'); rg.addColorStop(1,'rgba(255,255,255,0)');
+    ctx.fillStyle=rg; ctx.fillRect(0,0,128,128); t.refresh();
+    document.getElementById('loading')?.remove();
+    this.scene.start('AstroHome');
+  }
+}
+
+/* ---------- Campaign screens: Astrolive home → campaign → intro → hub → trial intro ---------- */
+function drawRama(s,x,y,sc=1){
+  const c=s.add.container(x,y);
+  const gl=s.add.image(0,-10,'glow').setScale(2.4).setTint(0xffd36b).setAlpha(0.45).setBlendMode('ADD');
+  const r=s.add.graphics();
+  r.fillStyle(0xf6a623,1); r.fillRoundedRect(-16,-10,32,58,10); r.fillStyle(0x2563eb,1); r.fillCircle(0,-26,15); r.fillRect(-22,-6,8,30); r.fillRect(14,-6,8,30);
+  r.fillStyle(0xfacc15,1); r.fillTriangle(-13,-38,13,-38,0,-62); r.fillRect(-14,-42,28,6);
+  r.lineStyle(4,0xc8a46a,1); r.beginPath(); r.arc(30,8,42,-1.25,1.25); r.strokePath(); r.lineStyle(1.5,0xfff3d6,1); r.lineBetween(30+Math.cos(-1.25)*42,8+Math.sin(-1.25)*42,30+Math.cos(1.25)*42,8+Math.sin(1.25)*42);
+  c.add([gl,r]); c.setScale(sc); s.tweens.add({targets:gl,alpha:0.25,duration:1400,yoyo:true,repeat:-1}); return c;
+}
+function drawHeadTracker(s,x,y,defeated,sz=1){
+  const c=s.add.container(x,y), icons=[];
+  for(let i=0;i<10;i++){ const ic=s.add.container((i-4.5)*30*sz,0), g=s.add.graphics();
+    g.fillStyle(0x3a1036,1); g.fillCircle(0,0,11); g.fillTriangle(-8,-6,8,-6,0,-19); g.fillStyle(0xff4d4d,1); g.fillCircle(-4,0,2); g.fillCircle(4,0,2);
+    const xg=s.add.graphics(); xg.lineStyle(4,0xef4444,1); xg.lineBetween(-10,-10,10,10); xg.lineBetween(10,-10,-10,10);
+    ic.add([g,xg]); xg.setVisible(i<defeated); if(i<defeated) g.setAlpha(0.35); ic.setScale(sz); c.add(ic); icons.push({ic,g,x:xg}); }
+  return {c,icons};
+}
+function crossHead(s,icon){ icon.x.setVisible(true).setScale(0); s.tweens.add({targets:icon.x,scale:1,duration:350,ease:'Back.out'}); s.tweens.add({targets:icon.g,alpha:0.35,duration:350}); }
+function freshState(){ return { tokens:[], bests:{}, seenIntro:false, attempts:{}, points:0, claimed:{} }; }
+
+/* A stand-in for the Astrolive home screen, so the banner → campaign → reward loop can be tested end to end */
+class AstroHome extends Phaser.Scene{
+  constructor(){ super('AstroHome'); }
+  create(data){
+    this.cameras.main.fadeIn(300,15,8,32);
+    this.add.rectangle(0,0,W,H,0xf5f3ff).setOrigin(0);
+    const hd=this.add.graphics(); hd.fillStyle(0x2e1065,1); hd.fillRect(0,0,W,112);
+    txt(this,20,40,CONFIG.brand,24,{bold:true,color:'#ffffff',ox:0});
+    txt(this,20,72,STATE.hero?`Namaste, ${heroName()}`:'Namaste',14,{color:'#ddd6fe',ox:0});
+    txt(this,W-20,40,'demo home',11,{color:'#a78bfa',ox:1});
+    // Dussehra campaign banner
+    const n=STATE.tokens.length, b=this.add.container(W/2,226), bg=this.add.graphics();
+    bg.fillStyle(0x000000,0.18); bg.fillRoundedRect(-172,-92,344,190,20);
+    bg.fillStyle(0x3b0a0a,1); bg.fillRoundedRect(-172,-96,344,190,20); bg.fillStyle(0x7c2d12,0.85); bg.fillRoundedRect(-172,-6,344,100,{tl:0,tr:0,bl:20,br:20});
+    const rv=drawRavana(this,120,40,10-headsDown(n),{color:0x1b0e24,eye:0xff4d4d}); rv.c.setScale(0.55);
+    const tr=drawTree(this,-130,80,stageFor(headsDown(n)),{glow:true,lights:headsDown(n)}); tr.setScale(0.45);
+    const glow=this.add.image(0,-10,'glow').setScale(3).setTint(0xf6a623).setAlpha(0.2).setBlendMode('ADD');
+    b.add([bg,glow,rv.c,tr,
+      txt(this,-150,-62,'Dussehra special',12,{bold:true,color:'#fde68a',ox:0}),
+      txt(this,-150,-30,'The Trials\nof Ravana',24,{display:true,color:'#ffd27a',ox:0,align:'left',lineSpacing:-4}),
+      txt(this,-150,30,n>=TOTAL?'Champion! Your reward is waiting':n?`${n}/${TOTAL} trials · keep going`:'Play the journey, win rewards',12,{color:'#fff3d6',ox:0})]);
+    const cta=button(this,0,0,120,36,n?'Continue':'Play now',()=>{},{size:15}); cta.disableInteractive(); cta.setPosition(-90,68); b.add(cta);
+    this.tweens.add({targets:glow,alpha:0.4,duration:1100,yoyo:true,repeat:-1});
+    b.setSize(344,190).setInteractive({useHandCursor:true});
+    b.on('pointerdown',()=>{ ac(); sfx('tap'); track('dussehra_game_opened',{source:'home_banner'}); goTo(this,'Campaign'); });
+    track('dussehra_banner_viewed',{placement:'home_top'});
+    // the rest of the host app (placeholders)
+    const card=(y,h)=>{ const g=this.add.graphics(); g.fillStyle(0xffffff,1); g.fillRoundedRect(20,y,W-40,h,16); g.lineStyle(1,0xe9d5ff,1); g.strokeRoundedRect(20,y,W-40,h,16); return g; };
+    card(338,78); txt(this,38,362,'Today\u2019s horoscope',15,{bold:true,color:'#2e1065',ox:0}); txt(this,38,388,'Tap to read your daily reading',12,{color:'#6b7280',ox:0});
+    this.add.zone(W/2,377,W-40,78).setInteractive({useHandCursor:true}).on('pointerdown',()=>toast(this,'Demo screen: the real Astrolive horoscope lives here.'));
+    txt(this,22,446,'Talk to an astrologer',16,{bold:true,color:'#2e1065',ox:0});
+    const see=txt(this,W-22,446,'See all',13,{bold:true,color:'#7c3aed',ox:1}).setInteractive({useHandCursor:true});
+    see.on('pointerdown',()=>{ track('dussehra_astrologer_listing_viewed',{source:'home'}); toast(this,'Demo: astrologer listing'); });
+    ['Astrologer A · Vedic','Astrologer B · Tarot','Astrologer C · Numerology'].forEach((nm,k)=>{ const y=476+k*72; card(y,62);
+      const av=this.add.graphics(); av.fillStyle([0xf59e0b,0x7c3aed,0x0ea5e9][k],1); av.fillCircle(54,y+31,18);
+      txt(this,82,y+22,nm,14,{bold:true,color:'#1f2937',ox:0}); txt(this,82,y+42,'Online · 4.8 rating',11,{color:'#6b7280',ox:0});
+      this.add.zone(W/2-40,y+31,W-130,62).setInteractive({useHandCursor:true}).on('pointerdown',()=>{ track('dussehra_astrologer_profile_viewed',{source:'home',slot:k+1}); toast(this,'Demo: astrologer profile'); });
+      const chat=button(this,W-66,y+31,72,32,'Chat',()=>{ track('dussehra_consultation_started',{source:'home',slot:k+1}); toast(this,'Demo: a consultation would start here.'); },{size:13,color:0x7c3aed,text:'#ffffff'}); });
+    const nav=this.add.graphics(); nav.fillStyle(0xffffff,1); nav.fillRect(0,H-58,W,58); nav.lineStyle(1,0xe5e7eb,1); nav.lineBetween(0,H-58,W,H-58);
+    ['Home','Chat','Call','Profile'].forEach((l,k)=>txt(this,W/8+k*W/4,H-30,l,13,{bold:k===0,color:k===0?'#7c3aed':'#6b7280'}));
+    const log=txt(this,W/2,H-76,'Campaign analytics log',11,{color:'#7c3aed'}).setInteractive({useHandCursor:true});
+    log.on('pointerdown',()=>this.showLog());
+    if(data&&data.toast) this.time.delayedCall(350,()=>toast(this,data.toast));
+  }
+  showLog(){
+    const c=this.add.container(0,0).setDepth(90);
+    c.add(this.add.rectangle(0,0,W,H,0x000000,0.7).setOrigin(0).setInteractive());
+    const p=this.add.graphics(); p.fillStyle(0x0f172a,1); p.fillRoundedRect(16,90,W-32,560,16); c.add(p);
+    c.add(txt(this,32,116,'Last events (also sent to dataLayer / AstroliveBridge)',12,{bold:true,color:'#a5b4fc',ox:0,wrap:W-64,align:'left'}));
+    const lines=EVENTS.slice(-16).reverse().map(e=>{ const {event,ts,...p}=e; const ps=Object.entries(p).map(([k,v])=>`${k}=${v}`).join(' '); return `${new Date(ts).toLocaleTimeString()}  ${event}${ps?'  '+ps:''}`; });
+    c.add(txt(this,32,140,lines.join('\n')||'No events yet.',11,{color:'#e2e8f0',ox:0,oy:0,align:'left',wrap:W-64,lineSpacing:4}));
+    c.add(button(this,W/2,690,160,44,'Close',()=>c.destroy(),{size:15}));
+  }
+}
+
+/* Full-screen campaign takeover */
+class Campaign extends Phaser.Scene{
+  constructor(){ super('Campaign'); }
+  create(){
+    this.cameras.main.fadeIn(400,15,8,32);
+    gradTex(this,'campBg',[[0,'#12060c'],[0.45,'#4a0e12'],[0.8,'#7c2d12'],[1,'#1a0806']]);
+    this.add.image(0,0,'campBg').setOrigin(0); stars(this,40,300);
+    this.add.particles(0,0,'spark',{x:{min:0,max:W},y:{min:H-200,max:H},lifespan:3000,speedY:{min:-60,max:-20},scale:{start:0.9,end:0},alpha:{start:0.8,end:0},tint:[0xff6b2b,0xffb020],frequency:90,blendMode:'ADD'});
+    this.add.image(W/2,330,'glow').setScale(4).setTint(0xb3123d).setAlpha(0.4).setBlendMode('ADD');
+    const n=STATE.tokens.length, rv=drawRavana(this,W/2,430,10-headsDown(n),{color:0x1b0e24,eye:0xff4d4d}); rv.c.setScale(1.7);
+    this.tweens.add({targets:rv.heads.map(h=>h.list[0]),alpha:0.7,duration:700,yoyo:true,repeat:-1});
+    this.tweens.add({targets:rv.c,scaleX:1.72,scaleY:1.68,duration:1600,yoyo:true,repeat:-1,ease:'Sine.inOut'});
+    const t=txt(this,W/2,110,'THE TRIALS\nOF RAVANA',38,{display:true,color:'#ffd27a',stroke:'#2a0505',strokeW:8,lineSpacing:-6}).setScale(0.8).setAlpha(0);
+    this.tweens.add({targets:t,scale:1,alpha:1,duration:700,ease:'Back.out'});
+    const l1=txt(this,W/2,560,'Ravana\u2019s five trials have begun.',19,{bold:true,color:'#fff3d6'}).setAlpha(0), l2=txt(this,W/2,592,n>=TOTAL?'You defeated Ravana. Your reward awaits.':n?`You\u2019ve cleared ${n} of ${TOTAL}. Keep going.`:'Will you complete the journey?',17,{color:'#fde4cf'}).setAlpha(0);
+    this.tweens.add({targets:l1,alpha:1,duration:600,delay:500}); this.tweens.add({targets:l2,alpha:1,duration:600,delay:900});
+    const go=button(this,W/2,660,300,60,n?'CONTINUE THE JOURNEY':'START THE JOURNEY',()=>{ sfx('bell');
+      if(!STATE.started){ track('dussehra_game_started',{}); goTo(this,'Intro'); } else goTo(this,n>=TOTAL?'Champion':'Journey'); },{size:19});
+    go.setAlpha(0); this.tweens.add({targets:go,alpha:1,duration:400,delay:1200,onComplete:()=>this.tweens.add({targets:go,scale:1.04,duration:700,yoyo:true,repeat:-1})});
+    const later=txt(this,W/2,726,'Maybe Later',15,{color:'#fde4cf'}).setInteractive({useHandCursor:true}).setAlpha(0);
+    this.tweens.add({targets:later,alpha:0.85,duration:400,delay:1400});
+    later.on('pointerdown',()=>{ sfx('tap'); track('dussehra_maybe_later',{}); goTo(this,'AstroHome',{toast:'Your journey will wait. Tap the Dussehra banner anytime.'}); });
+  }
+}
+
+/* Story intro: village, glowing Shami tree, narration, Rama, hero setup */
+class Intro extends Phaser.Scene{
+  constructor(){ super('Intro'); }
+  create(){
+    this.cameras.main.fadeIn(500,15,8,32);
+    gradTex(this,'villBg',[[0,'#1a0f2e'],[0.45,'#4a1d4f'],[0.7,'#c2410c'],[0.76,'#2a1608'],[1,'#120a06']]);
+    this.add.image(0,0,'villBg').setOrigin(0); stars(this,30,300); stringLights(this,230,36);
+    const g=this.add.graphics(); g.fillStyle(0x1c1009,1); g.fillRect(0,600,W,H-600);
+    rangoli(this,W/2,690,64); [40,W-40].forEach(x=>diya(this,x,640));
+    [[46,600,0xe11d48],[96,606,0x0ea5e9],[W-96,606,0x65a30d],[W-46,600,0xa855f7]].forEach(([x,y,col],k)=>{ const p=drawPerson(this,x,y,{col,hair:0x2a1608,adult:k%2===0}).setScale(0.62); this.tweens.add({targets:p,y:y-4,duration:700+k*120,yoyo:true,repeat:-1}); });
+    this.tree=drawTree(this,W/2,604,3,{}); this.tree.setScale(1.05);
+    this.treeGlow=this.add.image(W/2,470,'glow').setScale(0.5).setTint(0xffd36b).setAlpha(0).setBlendMode('ADD');
+    this.box=this.add.container(0,0).setDepth(30);
+    this.step=0; this.next=null;
+    this.time.delayedCall(700,()=>this.showStep(0));
+    this.input.on('pointerdown',(p,over)=>{ if(over.length||this.step===2||!this.next) return; const f=this.next; this.next=null; sfx('tap'); f(); });
+  }
+  say(speaker,line,y=120){
+    this.box.removeAll(true);
+    const t=txt(this,W/2,y+12,line,17,{wrap:W-80,color:'#fff3d6'}); const h=t.height+(speaker?58:34);
+    const b=this.add.graphics(); b.fillStyle(0x000000,0.6); b.fillRoundedRect(20,y-h/2,W-40,h,18); b.lineStyle(2,C.marigold,0.6); b.strokeRoundedRect(20,y-h/2,W-40,h,18);
+    this.box.add(b); if(speaker){ this.box.add(txt(this,W/2,y-h/2+20,speaker,16,{display:true,color:'#ffd27a'})); t.y=y+12; } else t.y=y; this.box.add(t);
+    const tap=txt(this,W-40,y+h/2-14,'Tap ›',12,{color:'#ffd27a',ox:1}); this.box.add(tap); this.tweens.add({targets:tap,alpha:0.3,duration:600,yoyo:true,repeat:-1});
+    this.box.setAlpha(0); this.tweens.add({targets:this.box,alpha:1,duration:300});
+  }
+  showStep(i){
+    this.step=i;
+    if(i===0){ this.tweens.add({targets:this.treeGlow,alpha:0.8,scale:3.6,duration:1600}); sfx('bell');
+      const n=txt(this,W/2,110,'Every victory begins\nwith a journey.',30,{display:true,color:'#ffd27a',stroke:'#2a0f2e',strokeW:6}).setAlpha(0);
+      this.tweens.add({targets:n,alpha:1,duration:900}); this.time.delayedCall(1200,()=>{ this.next=()=>{ this.tweens.add({targets:n,alpha:0,duration:300}); this.showStep(1); }; const t=txt(this,W/2,190,'Tap to continue',13,{color:'#fde4cf'}); this.tweens.add({targets:t,alpha:0.3,duration:600,yoyo:true,repeat:-1}); this.hint=t; }); }
+    if(i===1){ this.hint?.destroy(); this.rama=drawRama(this,W/2+96,560,0.9).setAlpha(0); this.tweens.add({targets:this.rama,alpha:1,y:552,duration:800});
+      this.say('Rama','This Dussehra, Ravana\u2019s ten heads guard five trials between us and Lanka.');
+      this.next=()=>{ this.say('Rama','You won\u2019t simply fight. Courage, wisdom, unity and kindness will carry you through. Overcome them one by one.'); this.next=()=>this.showStep(2); }; }
+    if(i===2){ this.box.removeAll(true); this.heroSetup(); }
+    if(i===3){ this.say('Rama',`Your journey begins now, ${heroName()}.`); this.next=()=>{ STATE.started=true; STATE.seenIntro=true; save(); goTo(this,'Journey'); }; }
+  }
+  heroSetup(){
+    const c=this.add.container(0,0).setDepth(40); this.setup=c;
+    c.add(this.add.rectangle(0,0,W,H,0x000000,0.6).setOrigin(0));
+    const p=this.add.graphics(); p.fillStyle(0x1a0f2e,0.97); p.fillRoundedRect(28,130,W-56,470,24); p.lineStyle(2,C.marigold,0.7); p.strokeRoundedRect(28,130,W-56,470,24); c.add(p);
+    c.add(txt(this,W/2,170,'Who walks this path?',26,{display:true,color:'#ffd27a'}));
+    c.add(txt(this,W/2,204,'You are a young hero. Rama will guide you.',14,{color:'#e9d5ff'}));
+    const cols=[0xf6a623,0xe11d48,0x0ea5e9,0x16a34a]; let col=(STATE.hero&&STATE.hero.col)||cols[0];
+    let preview=drawPerson(this,W/2,300,{col,hair:0x2a1608}).setScale(1.3); c.add(preview);
+    const rings=cols.map((cc,k)=>{ const x=W/2+(k-1.5)*58, r=this.add.circle(x,400,20,cc).setStrokeStyle(3,cc===col?0xffffff:0x1a0f2e).setInteractive({useHandCursor:true});
+      r.on('pointerdown',()=>{ sfx('tap'); col=cc; rings.forEach(o=>o.setStrokeStyle(3,o.fillColor===cc?0xffffff:0x1a0f2e)); preview.destroy(); preview=drawPerson(this,W/2,300,{col,hair:0x2a1608}).setScale(1.3); c.add(preview); }); c.add(r); return r; });
+    c.add(txt(this,W/2,436,'Outfit',12,{color:'#c4b5d6'}));
+    try{ this.input.keyboard?.clearCaptures(); }catch(e){}
+    const inp=this.add.dom(W/2,486,'input','width:220px;height:42px;font-size:18px;border-radius:12px;border:2px solid #f6a623;padding:0 12px;background:#2a1d36;color:#fff3d6;font-family:\'Baloo 2\',system-ui,sans-serif;text-align:center;outline:none;');
+    inp.setDepth(41); inp.node.setAttribute('maxlength','14'); inp.node.setAttribute('placeholder','Your name'); if(STATE.hero) inp.node.value=STATE.hero.name;
+    c.add(button(this,W/2,556,220,50,'Begin',()=>{ const nm=(inp.node.value||'').trim().slice(0,14)||'Hero'; STATE.hero={name:nm,col}; save(); track('dussehra_hero_created',{outfit:cols.indexOf(col)+1}); inp.node.blur(); inp.destroy(); c.destroy(); this.showStep(3); },{size:18}));
+  }
+}
+
+/* ---------- Temple symbols (used by Trial 2 and token icons) ---------- */
+const SYMS=['sun','moon','lotus','flame','star','bow'];
+const SYM_COL={wheel:0x1e3a8a,diya:0x9a3412,eye:0x1e3a8a,heart:0xe11d48,scale:0x7c2d12,mace:0x7c2d12,bridge:0x7c2d12,sun:0xf6c343,moon:0xc7d2fe,lotus:0xf472b6,flame:0xe2582b,star:0x7bdff2,bow:0xd9a066};
+const SLOT=0x3b2f45, STONE=0x4a3d52;
+function drawSymbol(s,key,x,y,r,bg=SLOT){
+  const c=s.add.container(x,y), g=s.add.graphics(); c.add(g); const col=SYM_COL[key];
+  if(key==='sun'){ g.fillStyle(col,1); for(let i=0;i<8;i++){ const a=i/8*Math.PI*2; g.fillTriangle(Math.cos(a-0.2)*r*0.5,Math.sin(a-0.2)*r*0.5,Math.cos(a+0.2)*r*0.5,Math.sin(a+0.2)*r*0.5,Math.cos(a)*r,Math.sin(a)*r); } g.fillCircle(0,0,r*0.5); }
+  else if(key==='moon'){ g.fillStyle(col,1); g.fillCircle(0,0,r*0.8); g.fillStyle(bg,1); g.fillCircle(r*0.4,-r*0.2,r*0.66); }
+  else if(key==='lotus'){ g.fillStyle(col,1); [-62,-31,0,31,62].forEach(d=>{ const a=Phaser.Math.DegToRad(d), by=r*0.45, tx=Math.sin(a)*r*0.95, ty=by-Math.cos(a)*r*1.1, mx=tx/2, my=(by+ty)/2, px=Math.cos(a)*r*0.24, py=Math.sin(a)*r*0.24; g.fillPoints([{x:0,y:by},{x:mx-px,y:my-py},{x:tx,y:ty},{x:mx+px,y:my+py}],true); }); g.fillStyle(0xfbcfe8,1); g.fillEllipse(0,r*0.5,r*1.3,r*0.28); }
+  else if(key==='flame'){ g.fillStyle(col,1); g.fillTriangle(-r*0.45,r*0.3,r*0.45,r*0.3,0,-r); g.fillCircle(0,r*0.3,r*0.45); g.fillStyle(0xffe08a,1); g.fillTriangle(-r*0.2,r*0.35,r*0.2,r*0.35,0,-r*0.25); g.fillCircle(0,r*0.4,r*0.2); }
+  else if(key==='star'){ const pts=[]; for(let i=0;i<10;i++){ const a=-Math.PI/2+i*Math.PI/5, rr=i%2?r*0.42:r; pts.push({x:Math.cos(a)*rr,y:Math.sin(a)*rr}); } g.fillStyle(col,1); g.fillPoints(pts,true); }
+  else if(key==='wheel'){ g.lineStyle(r*0.16,col,1); g.strokeCircle(0,0,r*0.85); g.lineStyle(r*0.1,col,1); for(let i=0;i<8;i++){ const a=i*Math.PI/4; g.lineBetween(Math.cos(a)*r*0.2,Math.sin(a)*r*0.2,Math.cos(a)*r*0.85,Math.sin(a)*r*0.85); } g.fillStyle(col,1); g.fillCircle(0,0,r*0.22); }
+  else if(key==='diya'){ g.fillStyle(col,1); g.fillEllipse(0,r*0.45,r*1.7,r*0.7); g.fillStyle(0xc2410c,1); g.fillEllipse(0,r*0.25,r*1.7,r*0.35); g.fillStyle(0xe2582b,1); g.fillTriangle(-r*0.3,r*0.15,r*0.3,r*0.15,0,-r*0.95); g.fillCircle(0,r*0.1,r*0.3); g.fillStyle(0xffe08a,1); g.fillTriangle(-r*0.13,r*0.15,r*0.13,r*0.15,0,-r*0.4); }
+  else if(key==='eye'){ g.fillStyle(0xfff3d6,1); g.fillEllipse(0,0,r*2,r*1.1); g.fillStyle(col,1); g.fillCircle(0,0,r*0.45); g.fillStyle(0x0f172a,1); g.fillCircle(0,0,r*0.2); g.lineStyle(r*0.12,col,1); g.strokeEllipse(0,0,r*2,r*1.1); }
+  else if(key==='heart'){ g.fillStyle(col,1); g.fillCircle(-r*0.42,-r*0.2,r*0.5); g.fillCircle(r*0.42,-r*0.2,r*0.5); g.fillTriangle(-r*0.9,0,r*0.9,0,0,r*0.95); }
+  else if(key==='scale'){ g.fillStyle(col,1); g.fillRect(-r*0.08,-r*0.75,r*0.16,r*1.5); g.fillRect(-r*0.45,r*0.7,r*0.9,r*0.14); g.fillRect(-r*0.9,-r*0.6,r*1.8,r*0.12); g.fillTriangle(-r*0.95,r*0.05,-r*0.45,r*0.05,-r*0.7,-r*0.55); g.fillTriangle(r*0.45,r*0.05,r*0.95,r*0.05,r*0.7,-r*0.55); }
+  else if(key==='mace'){ g.fillStyle(col,1); g.fillRect(-r*0.1,-r*0.1,r*0.2,r*1.1); g.fillCircle(0,-r*0.35,r*0.5); g.fillRect(-r*0.25,r*0.9,r*0.5,r*0.14); g.fillStyle(0xffe08a,1); g.fillRect(-r*0.5,-r*0.4,r,r*0.1); g.fillRect(-r*0.05,-r*0.85,r*0.1,r); }
+  else if(key==='bridge'){ g.lineStyle(r*0.2,col,1); g.beginPath(); g.arc(0,r*0.55,r*0.9,Math.PI,0); g.strokePath(); g.lineStyle(r*0.14,col,1); g.lineBetween(-r,r*0.55,r,r*0.55); [-0.55,-0.2,0.2,0.55].forEach(f=>g.lineBetween(f*r,r*0.55,f*r,r*0.55-Math.sqrt(Math.max(0,0.81-f*f))*r)); }
+  else if(key==='bow'){ g.lineStyle(r*0.16,col,1); g.beginPath(); g.arc(-r*0.35,0,r*0.85,-1.15,1.15); g.strokePath(); const ex=-r*0.35+Math.cos(1.15)*r*0.85, ey=Math.sin(1.15)*r*0.85; g.lineStyle(2,0xfff3d6,0.9); g.lineBetween(ex,-ey,ex,ey); g.lineStyle(3,0xfff3d6,1); g.lineBetween(ex-r*0.25,0,r*0.75,0); g.fillStyle(0xfff3d6,1); g.fillTriangle(r*0.72,-r*0.16,r*0.72,r*0.16,r,0); }
+  return c;
+}
+
+/* ---------- Vanara roles + art ---------- */
+const ROLES={
+  B:{name:'Builder', col:0xf59e0b, need:'build',   short:'builds its span + the one ahead', desc:'builds the span beside it and the next span toward Lanka.'},
+  H:{name:'Carrier',  col:0x4ade80, need:'stones',  short:'carries stones: its span ±1',     desc:'carries stones to the span beside it, the one above and the one below.'},
+  W:{name:'Warrior', col:0xef4444, need:'serpent', short:'guards from serpents: span ±1',   desc:'guards the span beside it and its neighbours from sea serpents.'},
+  S:{name:'Scout',   col:0x60a5fa, need:'fog',     short:'sees through fog: up to 2 away',  desc:'sees through fog up to 2 spans away in either direction.'},
+};
+function needIcon(s,type,x,y,sc=1){
+  const c=s.add.container(x,y), g=s.add.graphics(); c.add(g);
+  if(type==='stones'){ const p=[[-5,3],[5,3],[0,-4]]; g.fillStyle(0x4b5563,1); p.forEach(([a,b])=>g.fillCircle(a,b+1.2,5.5)); g.fillStyle(0xc4c9d1,1); p.forEach(([a,b])=>g.fillCircle(a,b,5)); }
+  else if(type==='build'){ g.fillStyle(0xa16207,1); g.fillRect(-1.8,-3,3.6,12); g.fillStyle(0xd1d5db,1); g.fillRect(-8,-8,16,6); }
+  else if(type==='serpent'){ g.fillStyle(0x14b8a6,1); g.fillCircle(-7,3,4); g.fillCircle(-2,-1,4); g.fillCircle(3,2,4); g.fillCircle(8,-3,4.5); g.fillStyle(0xfff3d6,1); g.fillCircle(9,-4,1.5); }
+  else if(type==='fog'){ g.fillStyle(0xe5e7eb,1); g.fillEllipse(-3,1,14,9); g.fillEllipse(4,-2,12,9); g.fillEllipse(2,3,16,7); }
+  c.setScale(sc); return c;
+}
+function drawVanara(s,role,x,y,sc=1){
+  const c=s.add.container(x,y), g=s.add.graphics(), col=ROLES[role].col;
+  g.lineStyle(4,0x7a4a22,1); g.beginPath(); g.arc(16,6,9,Math.PI*0.6,Math.PI*1.7,true); g.strokePath();
+  g.fillStyle(0x8b5a2b,1); g.fillEllipse(0,12,26,22);
+  g.fillCircle(-12,-10,5); g.fillCircle(12,-10,5); g.fillCircle(0,-8,12);
+  g.fillStyle(0xe8c39a,1); g.fillEllipse(0,-5,17,13); g.fillCircle(-12,-10,2.5); g.fillCircle(12,-10,2.5); g.fillEllipse(0,13,14,12);
+  g.fillStyle(0x2a1608,1); g.fillCircle(-4,-8,1.8); g.fillCircle(4,-8,1.8); g.fillEllipse(0,-2,6,2.5);
+  g.fillStyle(col,1); g.fillRect(-12,-18,24,4.5); g.fillTriangle(10,-18,18,-22,16,-13);
+  c.add(g); c.add(needIcon(s,ROLES[role].need,0,13,0.6));
+  c.setScale(sc); return c;
+}
+
+/* ---------- People ---------- */
+function drawPerson(s,x,y,o){
+  const c=s.add.container(x,y), g=s.add.graphics(); c.add(g);
+  if(o.vanara){
+    g.lineStyle(4,0x7a4a22,1); g.beginPath(); g.arc(18,10,10,Math.PI*0.6,Math.PI*1.7,true); g.strokePath();
+    g.fillStyle(0x8b5a2b,1); g.fillEllipse(0,16,30,30); g.fillCircle(-14,-12,6); g.fillCircle(14,-12,6); g.fillCircle(0,-10,15);
+    g.fillStyle(0xe8c39a,1); g.fillEllipse(0,-6,21,16); g.fillCircle(-14,-12,3); g.fillCircle(14,-12,3); g.fillEllipse(0,18,18,18);
+    g.fillStyle(0x2a1608,1); g.fillCircle(-5,-10,2.2); g.fillCircle(5,-10,2.2); g.fillEllipse(0,-2,7,3);
+    g.fillStyle(o.col,1); g.fillRect(-15,-21,30,5);
+  } else {
+    g.fillStyle(o.col,1); g.fillRoundedRect(-17,2,34,42,12);
+    g.fillStyle(0xe8b07a,1); g.fillCircle(0,-14,15);
+    g.fillStyle(o.hair,1); g.fillEllipse(0,-25,32,14); if(o.adult){ g.fillEllipse(-13,-16,8,16); g.fillEllipse(13,-16,8,16); }
+    g.fillStyle(0x2a1608,1); g.fillCircle(-5,-13,2); g.fillCircle(5,-13,2); g.lineStyle(2,0x7c2d12,1); g.beginPath(); g.arc(0,-8,5,0.3,Math.PI-0.3); g.strokePath();
+    g.fillStyle(C.kumkum,1); g.fillCircle(0,-21,1.8);
+    if(o.adult){ c.setScale(1.12); }
+  }
+  return c;
+}
+/* =========================================================
+   THE JOURNEY — one continuous, side-scrolling world.
+   Village → Forest of Courage → Temple of Wisdom → The Vanara Bridge
+   Each trial is a story mission inside the world, not a separate mini-game.
+   ========================================================= */
+const WORLD_W=8200, GROUND=600;
+const SEGS=[ {key:'village',x0:0,x1:700,name:'Ayodhya'}, {key:'forest',x0:700,x1:2700,name:'Forest of Courage',trial:'courage'}, {key:'temple',x0:2700,x1:4100,name:'Temple of Wisdom',trial:'wisdom'}, {key:'ocean',x0:4100,x1:5900,name:'The Vanara Bridge',trial:'unity'}, {key:'lanka',x0:5900,x1:7100,name:'The Two Paths',trial:'righteousness'}, {key:'fortress',x0:7100,x1:WORLD_W,name:'Ravana\u2019s Fortress',trial:'ravana'} ];
+const segAt=x=>SEGS.find(s=>x>=s.x0&&x<s.x1)||SEGS[SEGS.length-1];
+const RIDDLES={sun:'I rise each morning and warm the whole world.',moon:'I shine only at night, and change my shape.',lotus:'I bloom from muddy water, yet stay clean.',flame:'I drink oil and give back light.',star:'I am a far-off light that sailors steer by.',bow:'I bend but never break, and send arrows flying.'};
+
+/* Screen-fixed UI: every child of a fixed container must also ignore the camera,
+   otherwise taps miss once the world has scrolled. */
+function fixDeep(o){ if(o.setScrollFactor) o.setScrollFactor(0); if(o.list) o.list.forEach(fixDeep); return o; }
+(function(){ const P=Phaser.GameObjects.Container.prototype, add=P.addHandler;
+  P.addHandler=function(go){ add.call(this,go); if(this.scrollFactorX===0) fixDeep(go); }; })();
+
+class Journey extends Phaser.Scene{
+  constructor(){ super('Journey'); }
+  create(){
+    this.n=STATE.tokens.length;
+    if(this.n>=TOTAL){ this.scene.start('Champion'); return; }
+    this.cameras.main.fadeIn(600,15,8,32);
+    // skies blend as you travel
+    gradTex(this,'skyVillage',[[0,'#1a0f2e'],[0.45,'#5b2350'],[0.75,'#c2410c'],[1,'#2a1608']]);
+    gradTex(this,'skyForest',[[0,'#020a08'],[0.6,'#0b2a1f'],[1,'#06140e']]);
+    gradTex(this,'skyTemple',[[0,'#3b1a0a'],[0.5,'#a1542a'],[1,'#e8b37a']]);
+    gradTex(this,'skyOcean',[[0,'#0b3b6e'],[0.5,'#f59e0b'],[0.72,'#fde68a'],[1,'#0e4f7a']]);
+    gradTex(this,'skyLanka',[[0,'#1a0820'],[0.5,'#6b1d3a'],[0.8,'#b4532a'],[1,'#2a0f0a']]);
+    gradTex(this,'skyFortress',[[0,'#120205'],[0.5,'#4a0a0a'],[0.8,'#9a2a0a'],[1,'#1a0503']]);
+    this.skies={}; ['village','forest','temple','ocean','lanka','fortress'].forEach(k=>this.skies[k]=this.add.image(0,0,'sky'+k[0].toUpperCase()+k.slice(1)).setOrigin(0).setScrollFactor(0).setDepth(-20).setAlpha(0));
+    this.sun=this.add.image(W*0.72,250,'glow').setScale(3).setTint(0xffd36b).setAlpha(0).setScrollFactor(0).setDepth(-19).setBlendMode('ADD');
+    this.blockers=[]; this.triggers=[]; this.wisps=[];
+    this.drawParallax();
+    this.drawVillage(); this.drawForest(); this.drawTemple(); this.drawOcean(); this.drawLanka(); this.drawFortress();
+    // the hero
+    const startX=[140,2730,4140,5620,7040][this.n];
+    this.hero=this.add.container(startX,GROUND).setDepth(10);
+    this.heroBody=drawPerson(this,0,-35,heroLook()).setScale(0.8);
+    this.lamp=this.add.image(16,-40,'glow').setScale(0.5).setTint(0xffc14d).setAlpha(0.8).setBlendMode('ADD');
+    const fl=this.add.image(16,-40,'dot').setScale(0.25,0.4).setTint(0xffe08a).setBlendMode('ADD');
+    this.hero.add([this.add.ellipse(0,2,40,10,0x000000,0.35),this.heroBody,this.lamp,fl]);
+    this.tweens.add({targets:fl,scaleY:0.32,duration:160,yoyo:true,repeat:-1});
+    this.vx=0; this.vy=0; this.air=false; this.face=1; this.light=0.6; this.hurtT=0;
+    this.orbsGot=0; this.waste=0; this.stones=0; this.built=0; this.wrongPaths=0; this.wrongDoors=0; this.mode='walk'; this.talking=false; this.queue=[];
+    // darkness for the forest
+    this.dark=this.add.renderTexture(0,0,W,H).setOrigin(0).setScrollFactor(0).setDepth(30);
+    this.stamp=this.make.image({key:'glow',add:false});
+    this.buildHud(); this.buildControls(); this.setupTriggers();
+    this.cameras.main.setBounds(0,0,WORLD_W,H); this.cameras.main.scrollX=Phaser.Math.Clamp(startX-W*0.38,0,WORLD_W-W);
+    this.lastSeg=null;
+    this.input.keyboard?.on('keydown',e=>{ const k=e.key.toLowerCase(); if(k==='arrowleft'||k==='a') this.kDir=-1; if(k==='arrowright'||k==='d') this.kDir=1; if(k===' '||k==='arrowup'||k==='w') this.jump(); if(k==='e'||k==='enter') this.doAction(); });
+    this.input.keyboard?.on('keyup',e=>{ const k=e.key.toLowerCase(); if(['arrowleft','a','arrowright','d'].includes(k)) this.kDir=0; });
+    this.events.once('shutdown',()=>this.input.keyboard?.removeAllListeners());
+  }
+
+  /* ---------- world drawing ---------- */
+  drawParallax(){
+    const far=this.add.graphics().setScrollFactor(0.25).setDepth(-12), mid=this.add.graphics().setScrollFactor(0.55).setDepth(-11);
+    for(let x=-60;x<WORLD_W*0.25+W+120;x+=46){ const seg=segAt((x-120)/0.25).key, h=40+((x*37)%60);
+      if(seg==='village'){ far.fillStyle(0x2a1636,1); far.fillRect(x,GROUND-130-h*0.3,40,200); far.fillCircle(x+20,GROUND-130-h*0.3,20); }
+      if(seg==='forest'){ far.fillStyle(0x07160f,1); far.fillTriangle(x-20,GROUND-40,x+30,GROUND-40,x+5,GROUND-200-h); }
+      if(seg==='lanka'||seg==='fortress'){ far.fillStyle(seg==='lanka'?0x3a0f1f:0x2a0505,1); far.fillRect(x,GROUND-150-h*0.5,36,240); far.fillTriangle(x-4,GROUND-150-h*0.5,x+40,GROUND-150-h*0.5,x+18,GROUND-185-h*0.5); }
+      if(seg==='temple'&&(x-120)/0.25<3900){ far.fillStyle(0x7a3e20,1); far.fillRect(x,GROUND-110-h*0.4,46,200); }
+    }
+    for(let x=-60;x<WORLD_W*0.55+W+120;x+=70){ const seg=segAt((x-160)/0.55).key, h=(x*53)%70;
+      if(seg==='village'){ mid.fillStyle(0x1c1009,1); mid.fillRect(x,GROUND-90-h*0.4,56,160); mid.fillTriangle(x-6,GROUND-90-h*0.4,x+62,GROUND-90-h*0.4,x+28,GROUND-130-h*0.4); }
+      if(seg==='forest'){ mid.fillStyle(0x04100a,1); mid.fillRect(x+22,GROUND-200,12,220); mid.fillCircle(x+28,GROUND-210-h,46); mid.fillCircle(x+2,GROUND-170-h,32); }
+      if(seg==='temple'){ mid.fillStyle(0x5a2d16,1); mid.fillRect(x+10,GROUND-170-h*0.5,22,240); mid.fillRect(x,GROUND-180-h*0.5,42,14); }
+    }
+    const lk=(WORLD_W-260)*0.55-150; mid.fillStyle(0x1a0a12,1); mid.fillRect(lk,GROUND-210,260,260); for(let i=0;i<6;i++){ mid.fillRect(lk+i*46,GROUND-240,26,34); } mid.fillTriangle(lk+100,GROUND-210,lk+160,GROUND-210,lk+130,GROUND-300);
+  }
+  drawVillage(){
+    const g=this.add.graphics().setDepth(1); g.fillStyle(0x2a1608,1); g.fillRect(0,GROUND,700,H-GROUND); g.fillStyle(0x3b2414,1); g.fillRect(0,GROUND,700,6);
+    rangoli(this,200,GROUND+60,46);
+    drawTree(this,330,GROUND,stageFor(headsDown(this.n)),{glow:true,lights:headsDown(this.n)}).setDepth(2).setScale(1.1);
+    [[70,0xe11d48],[520,0x0ea5e9],[620,0xa855f7]].forEach(([x,col],k)=>{ const p=drawPerson(this,x,GROUND-37,{col,hair:0x2a1608,adult:k===1}).setScale(0.8).setDepth(3); this.tweens.add({targets:p,y:p.y-3,duration:700+k*100,yoyo:true,repeat:-1}); });
+    this.rama=drawRama(this,450,GROUND-48,0.95).setDepth(4);
+    for(let x=20;x<700;x+=40){ const d=this.add.image(x,GROUND-150+Math.sin(x)*10,'dot').setScale(0.3).setTint([0xffd166,0xff6b6b,0x7bdff2][x%3]).setBlendMode('ADD').setDepth(2); this.tweens.add({targets:d,alpha:0.3,duration:600+Math.random()*700,yoyo:true,repeat:-1}); }
+  }
+  drawForest(){
+    const g=this.add.graphics().setDepth(1); g.fillStyle(0x0d1a12,1); g.fillRect(700,GROUND,2000,H-GROUND); g.fillStyle(0x163626,1); g.fillRect(700,GROUND,2000,5);
+    for(let x=720;x<2700;x+=34){ g.fillStyle(0x0a140e,1); g.fillTriangle(x,GROUND,x+10,GROUND,x+5,GROUND-10-(x%17)); }
+    // foreground trunks
+    const fg=this.add.graphics().setDepth(20); for(let x=760;x<2700;x+=260){ fg.fillStyle(0x020604,0.95); fg.fillRect(x,0,26,H); fg.fillEllipse(x+13,H-60,70,40); }
+    // thorns
+    this.thorns=[1050,1400,2080,2380].map(x=>{ const t=this.add.graphics().setDepth(5); t.fillStyle(0x2a0f2e,1); for(let i=-3;i<=3;i++) t.fillTriangle(x+i*7-6,GROUND,x+i*7+6,GROUND,x+i*7,GROUND-22-Math.abs(3-Math.abs(i))*4); t.fillStyle(0x5b1f5a,1); t.fillEllipse(x,GROUND-6,48,14); return {x}; });
+    // light orbs
+    this.orbs=[]; for(let x=820;x<2560;x+=105){ const high=(x/105|0)%3===0, y=high?480:556; const o=this.add.image(x,y,'glow').setScale(0.35).setTint(0xffd36b).setBlendMode('ADD').setDepth(31); const c=this.add.image(x,y,'dot').setScale(0.4).setTint(0xfff1a8).setDepth(31); this.tweens.add({targets:[o,c],y:y-8,duration:900+Math.random()*400,yoyo:true,repeat:-1}); this.orbs.push({x,y,o,c,got:false}); }
+    // the fork: two archways, fireflies show the true one
+    this.forkTrue=Phaser.Math.Between(0,1); this.arches=[1600,1730].map((x,i)=>{ const a=this.add.graphics().setDepth(4); a.fillStyle(0x1f3326,1); a.fillRect(x-40,GROUND-120,12,120); a.fillRect(x+28,GROUND-120,12,120); a.fillStyle(0x2f5a2a,1); a.fillEllipse(x,GROUND-122,96,34); a.fillStyle(0x000000,0.75); a.fillRect(x-28,GROUND-108,56,108); return {x,i}; });
+    const ax=this.arches[this.forkTrue].x;
+    this.add.particles(0,0,'spark',{x:{min:ax-140,max:ax-20},y:{min:GROUND-140,max:GROUND-40},lifespan:1800,speedX:{min:30,max:60},speedY:{min:-8,max:8},scale:{start:0.9,end:0},tint:0xd9f99d,frequency:120,blendMode:'ADD'}).setDepth(31);
+    this.vines=this.add.graphics().setDepth(6); this.vines.fillStyle(0x163626,1); for(let y=GROUND-180;y<GROUND;y+=14) this.vines.fillEllipse(1800+((y/14)%2)*8,y,30,18);
+    this.blockers.push({x:1790,on:true,id:'vines'});
+    this.add.image(2660,GROUND-80,'glow').setScale(2.5).setTint(0xfde68a).setAlpha(0.4).setBlendMode('ADD').setDepth(31);
+  }
+  drawTemple(){
+    const g=this.add.graphics().setDepth(1);
+    g.fillStyle(0x5b4636,1); g.fillRect(2700,GROUND,1400,H-GROUND); g.fillStyle(0x7a5f48,1); for(let x=2700;x<4100;x+=60) g.fillRect(x,GROUND,58,8);
+    g.fillStyle(0xb98a5e,1); g.fillRect(2860,170,1180,GROUND-170); g.fillStyle(0xa77a50,1); for(let y=200;y<GROUND;y+=40) g.fillRect(2860,y,1180,3);
+    g.fillStyle(0x8a5a32,1); g.fillRect(2840,150,1220,30); for(let x=2860;x<4040;x+=150){ g.fillStyle(0x9c6b42,1); g.fillRect(x,180,26,GROUND-180); }
+    g.fillStyle(0x7a3e20,1); g.fillTriangle(2760,GROUND,2860,GROUND,2860,GROUND-60); g.fillRect(2800,GROUND-40,60,40);
+    // carvings with clues
+    const pool=Phaser.Utils.Array.Shuffle(SYMS.slice()); this.doorSyms=pool.slice(0,3); this.doorTrue=Phaser.Math.Between(0,2);
+    const wrong=[0,1,2].filter(i=>i!==this.doorTrue), sy=this.doorSyms;
+    this.clues=[`\u201cThe true door is not marked by the ${sy[wrong[0]]}.\u201d`,`\u201cBehind the ${sy[wrong[1]]}, there is only dust.\u201d`,`\u201c${RIDDLES[sy[this.doorTrue]]} Where I am carved, the way opens.\u201d`];
+    this.carvings=[3060,3360,3660].map((x,i)=>{ const p=this.add.graphics().setDepth(2); p.fillStyle(0x6b4a2f,1); p.fillRoundedRect(x-46,330,92,120,10); p.lineStyle(3,0x4a3320,1); p.strokeRoundedRect(x-46,330,92,120,10);
+      const sym=drawSymbol(this,['sun','moon','lotus','flame','star','bow'][i*2%6],x,385,20,0x6b4a2f).setAlpha(0.25).setDepth(3);
+      const gl=this.add.image(x,390,'glow').setScale(1.4).setTint(0xffd36b).setAlpha(0).setBlendMode('ADD').setDepth(3);
+      return {x,i,read:false,sym,gl}; });
+    this.doors=[3800,3900,4000].map((x,i)=>{ const d=this.add.graphics().setDepth(2); d.fillStyle(0x3b2414,1); d.fillRoundedRect(x-36,GROUND-150,72,150,{tl:36,tr:36,bl:0,br:0}); d.lineStyle(3,0xc8a46a,1); d.strokeRoundedRect(x-36,GROUND-150,72,150,{tl:36,tr:36,bl:0,br:0});
+      drawSymbol(this,this.doorSyms[i],x,GROUND-180,16,0xb98a5e).setDepth(3);
+      const gl=this.add.image(x,GROUND-70,'glow').setScale(1.6).setTint(0xffd36b).setAlpha(0).setBlendMode('ADD').setDepth(3); return {x,i,d,gl}; });
+    this.blockers.push({x:4050,on:true,id:'templeGate'});
+    this.gate=this.add.graphics().setDepth(6); this.gate.fillStyle(0x4a3320,1); this.gate.fillRect(4044,GROUND-200,18,200);
+  }
+  drawOcean(){
+    const g=this.add.graphics().setDepth(1);
+    g.fillStyle(0xd9b77a,1); g.fillRect(4100,GROUND,500,H-GROUND); g.fillStyle(0x8a6a3a,1); g.fillRect(5500,GROUND,400,H-GROUND);
+    this.water=this.add.graphics().setDepth(1); this.water.fillStyle(0x0e5f8a,1); this.water.fillRect(4600,GROUND+8,900,H-GROUND); this.water.fillStyle(0x38bdf8,0.5); for(let x=4600;x<5500;x+=40) this.water.fillEllipse(x+20,GROUND+14,30,6);
+    this.tweens.add({targets:this.water,y:4,duration:1400,yoyo:true,repeat:-1,ease:'Sine.inOut'});
+    // quarry
+    const q=this.add.graphics().setDepth(2); for(let k=0;k<9;k++){ q.fillStyle(k%2?0x9ca3af:0x6b7280,1); q.fillEllipse(4180+(k%4)*22,GROUND-10-Math.floor(k/4)*14,26,18); }
+    this.add.text(4185,GROUND-70,'',{}).setVisible(false);
+    // rocks under each span; some are hollow
+    this.spans=[]; for(let i=0;i<6;i++){ const x=4600+i*150+75, r=this.add.graphics().setDepth(2); r.fillStyle(0x334155,1); r.fillEllipse(x,GROUND+40,110,40);
+      const buoy=this.add.image(x,GROUND-6,'glow').setScale(0.6).setTint(0x86efac).setAlpha(0).setBlendMode('ADD').setDepth(4);
+      const fog=this.add.text(x,GROUND-30,'?',{fontFamily:FONT_B,fontSize:'26px',color:'#e0f2fe',resolution:DPR}).setOrigin(0.5).setDepth(4).setAlpha(0.8);
+      this.spans.push({x,scouted:false,built:false,buoy,fog}); }
+    this.blockers.push({x:4596,on:true,id:'water'});
+    // the team
+    this.team={ S:drawVanara(this,'S',4450,GROUND-20,1).setDepth(8), H:drawVanara(this,'H',4500,GROUND-20,1).setDepth(8), B:drawVanara(this,'B',4550,GROUND-20,1).setDepth(8) };
+    this.chief=drawVanara(this,'W',4300,GROUND-24,1.15).setDepth(8);
+    this.stoneStack=this.add.graphics().setDepth(7);
+  }
+
+  /* ---------- HUD, controls, dialogue ---------- */
+  fixed(o){ return fixDeep(o); }
+  buildHud(){
+    const hud=this.fixed(this.add.graphics()).setDepth(50); hud.fillStyle(0x000000,0.45); hud.fillRoundedRect(12,12,W-24,56,16);
+    this.fixed(button(this,38,40,40,34,'❚❚',()=>this.pause(),{size:14,color:0x3a2350,text:'#fff3d6'})).setDepth(51);
+    this.areaTxt=this.fixed(txt(this,W/2,28,'',14,{bold:true,color:'#ffd27a'})).setDepth(52);
+    this.tracker=drawHeadTracker(this,W/2,52,headsDown(this.n),0.5);
+    this.coinHud=this.fixed(txt(this,W-28,40,'',13,{bold:true,color:'#fde68a',ox:1})).setDepth(52); this.fixed(this.tracker.c).setDepth(52);
+    this.lightLbl=this.fixed(txt(this,W-96,40,'Light',11,{color:'#fde68a',ox:1})).setDepth(52);
+    this.lightBg=this.fixed(this.add.rectangle(W-90,40,62,8,0x2a1d36).setOrigin(0,0.5)).setDepth(52);
+    this.lightBar=this.fixed(this.add.rectangle(W-90,40,62,8,0xffc14d).setOrigin(0,0.5)).setDepth(53);
+    this.objTxt=this.fixed(txt(this,W/2,92,'',14,{bold:true,color:'#fff3d6',stroke:'#000',strokeW:4,wrap:W-40})).setDepth(52);
+  }
+  buildControls(){
+    this.moveDir=0; this.kDir=0; this.movePtr=null;
+    const mk=(x,label,dir)=>{ const c=this.fixed(this.add.container(x,712)).setDepth(55), g=this.add.graphics(); g.fillStyle(0x000000,0.45); g.fillCircle(0,0,34); g.lineStyle(2,0xffd27a,0.6); g.strokeCircle(0,0,34);
+      c.add([g,txt(this,0,0,label,26,{bold:true,color:'#ffd27a'})]); c.setSize(72,72).setInteractive();
+      c.on('pointerdown',p=>{ ac(); this.moveDir=dir; this.movePtr=p.id; c.setScale(0.92); }); c.dirBtn=true; return c; };
+    this.btnL=mk(48,'◀',-1); this.btnR=mk(128,'▶',1);
+    this.btnJ=this.fixed(button(this,W-44,712,72,60,'Jump',()=>this.jump(),{size:16})).setDepth(55);
+    this.btnA=this.fixed(button(this,W-140,712,108,52,'Act',()=>this.doAction(),{size:14,color:0x86efac,text:'#0f172a'})).setDepth(55).setVisible(false);
+    const up=p=>{ if(p.id===this.movePtr){ this.moveDir=0; this.movePtr=null; this.btnL.setScale(1); this.btnR.setScale(1); } };
+    this.input.on('pointerup',up); this.input.on('pointerupoutside',up);
+    const stop=()=>{ this.moveDir=0; this.movePtr=null; this.kDir=0; this.btnL.setScale(1); this.btnR.setScale(1); this.drawingBow=false; };
+    this.game.events.on('blur',stop); this.game.events.on('hidden',stop); this.events.once('shutdown',()=>{ this.game.events.off('blur',stop); this.game.events.off('hidden',stop); });
+    this.walkCtrls=[this.btnL,this.btnR,this.btnJ];
+    // team cards for the bridge (hidden until needed)
+    this.teamCards={}; [['S','Scout','find safe rocks'],['H','Carrier','bring a stone'],['B','Builder','place a stone']].forEach(([r,name,how],k)=>{
+      const x=W/2+(k-1)*124, c=this.fixed(this.add.container(x,706)).setDepth(56).setVisible(false), g=this.add.graphics();
+      g.fillStyle(0x1a0f2e,0.95); g.fillRoundedRect(-58,-50,116,100,16); g.lineStyle(2,ROLES[r].col,0.9); g.strokeRoundedRect(-58,-50,116,100,16);
+      const ring=this.add.graphics(); c.add([g,drawVanara(this,r,0,-16,0.75),txt(this,0,20,name,14,{bold:true,color:'#fff3d6'}),txt(this,0,37,how,10,{color:'#c4b5d6'}),ring]);
+      c.setSize(116,100).setInteractive({useHandCursor:true}); c.on('pointerdown',()=>this.teamAct(r));
+      this.teamCards[r]={c,ring,busy:0,dur:{S:2200,H:2400,B:1300}[r]}; });
+    this.bridgeTxt=this.fixed(txt(this,W/2,640,'',13,{bold:true,color:'#fff3d6',stroke:'#000',strokeW:4})).setDepth(56).setVisible(false);
+  }
+  setCtrlMode(m){ this.walkCtrls.forEach(o=>o.setVisible(m==='walk')); Object.values(this.teamCards).forEach(t=>t.c.setVisible(m==='bridge')); this.bridgeTxt.setVisible(m==='bridge'); if(m!=='walk') this.btnA.setVisible(false); }
+  say(lines,done){ this.queue.push(...lines.map(l=>({...l}))); if(done) this.queue.push({done}); if(!this.talking) this.nextLine(); }
+  nextLine(){
+    if(this.dlg){ this.dlg.destroy(); this.dlg=null; }
+    const l=this.queue.shift(); if(!l){ this.talking=false; return; }
+    if(l.done){ this.talking=false; l.done(); if(!this.talking&&this.queue.length) this.nextLine(); return; }
+    this.talking=true; this.moveDir=0;
+    const c=this.fixed(this.add.container(0,0)).setDepth(70); this.dlg=c;
+    const block=this.add.rectangle(0,0,W,H,0x000000,0.001).setOrigin(0).setInteractive(); block.on('pointerdown',()=>{ sfx('tap'); this.nextLine(); });
+    const t=txt(this,W/2,0,l.text,16,{wrap:W-90,color:'#fff3d6'}), h=t.height+60, y=150;
+    const b=this.add.graphics(); b.fillStyle(0x000000,0.72); b.fillRoundedRect(20,y-h/2,W-40,h,18); b.lineStyle(2,l.col||C.marigold,0.8); b.strokeRoundedRect(20,y-h/2,W-40,h,18);
+    t.y=y+10; const nm=txt(this,W/2,y-h/2+20,l.who,16,{display:true,color:'#ffd27a'}), tap=txt(this,W-40,y+h/2-14,'tap ›',11,{color:'#ffd27a',ox:1});
+    c.add([block,b,nm,t,tap]); c.setAlpha(0); this.tweens.add({targets:c,alpha:1,duration:200});
+  }
+  pause(){
+    if(this.paused) return; this.paused=true;
+    const c=this.fixed(this.add.container(0,0)).setDepth(90);
+    c.add(this.add.rectangle(0,0,W,H,0x000000,0.75).setOrigin(0).setInteractive());
+    const p=this.add.graphics(); p.fillStyle(0x1a0f2e,0.97); p.fillRoundedRect(40,240,W-80,300,22); c.add(p);
+    c.add(txt(this,W/2,280,'Journey paused',24,{display:true,color:'#ffd27a'}));
+    c.add(drawHeadTracker(this,W/2,330,headsDown(STATE.tokens.length),0.8).c);
+    c.add(button(this,W/2,400,240,50,'Resume',()=>{ c.destroy(); this.paused=false; },{size:17}));
+    c.add(button(this,W/2,462,240,46,`Save & return to ${CONFIG.brand}`,()=>goTo(this,'AstroHome',{toast:'Your journey is saved at the last checkpoint.'}),{size:14,color:0x3a2350,text:'#fff3d6'}));
+  }
+
+  /* ---------- story triggers ---------- */
+  setupTriggers(){
+    const R=(t)=>({who:'Rama',text:t}), V=(t)=>({who:'Vanara chief',text:t,col:0xef4444});
+    const T=(x,fn)=>this.triggers.push({x,fn,done:false});
+    if(this.n===0){
+      T(300,()=>this.say([R('The Shami tree glows for you. Every victory begins with a journey.'),R('Hold ▶ to walk, tap Jump to leap. The Forest of Courage lies ahead.')]));
+      T(760,()=>this.enterTrial('courage',[R('Strange shapes will whisper \u201cturn back.\u201d Tap them away with your light.'),R('Collect the light. Jump the thorns. And when the path splits, follow the fireflies.')]));
+    }
+    if(this.n<=1) T(2780,()=>this.enterTrial('wisdom',[R('An ancient temple. Three doors, and only one leads forward.'),R('Read every carving on the walls. Tap Examine when you stand before one.')]));
+    T(4180,()=>this.enterTrial('unity',[V('The ocean stands between us and Lanka. No Vanara can build this bridge alone.')]));
+    T(4300,()=>this.say([V('Scouts find the safe rocks. Carriers bring stones. Builders place them.'),V('Keep the stones moving. Big waves wash away anything left waiting at the shore!')],()=>this.startBridge()));
+    T(5580,()=>this.trialComplete('unity'));
+    T(5960,()=>this.enterTrial('righteousness',[R('Lanka at last. Two roads lead to the fortress.'),R('One is easy and paved with gold. One is longer, and people there need help. The choice is yours.')]));
+    T(7060,()=>this.trialComplete('righteousness'));
+    T(7150,()=>this.enterTrial('ravana',[R('Ravana\u2019s fortress. Use everything you have learned: courage, wisdom, unity and dharma.')]));
+    T(7460,()=>this.startBattle());
+    T(2640,()=>this.trialComplete('courage'));
+    T(4080,()=>this.trialComplete('wisdom'));
+    this.triggers.forEach(t=>{ if(t.x<this.hero.x-20) t.done=true; });
+  }
+  enterTrial(key,lines){
+    const t=TRIALS.find(x=>x.key===key); STATE.attempts[key]=(STATE.attempts[key]||0)+1; STATE.tStart=Date.now(); save();
+    track('dussehra_trial_started',{trial_number:t.id,trial:key,attempt_count:STATE.attempts[key]});
+    const c=this.fixed(this.add.container(W/2,300)).setDepth(65).setAlpha(0);
+    c.add([txt(this,0,-30,`Trial ${t.id}`,16,{bold:true,color:'#fde68a',stroke:'#000',strokeW:4}),txt(this,0,10,t.title,34,{display:true,color:'#ffd27a',stroke:'#1a0f2e',strokeW:7})]);
+    this.tweens.add({targets:c,alpha:1,duration:400,hold:1300,yoyo:true,onComplete:()=>{ c.destroy(); this.say(lines); }}); sfx('bell');
+    this.objTxt.setText({courage:'Reach the far edge of the forest',wisdom:'Read the 3 carvings, then choose a door',unity:'Talk to the Vanara chief',righteousness:'Choose your path at the signpost',ravana:'Face Ravana'}[key]);
+  }
+
+  /* ---------- actions ---------- */
+  jump(){ if((this.mode!=='walk'&&!(this.mode==='battle'&&this.phase===1))||this.talking||this.paused||this.air) return; this.vy=-430; this.air=true; sfx('jump'); }
+  nearest(list,range){ let best=null, bd=range; list.forEach(o=>{ const d=Math.abs(o.x-this.hero.x); if(d<bd){ bd=d; best=o; } }); return best; }
+  contextAction(){
+    const h=this.hero.x;
+    if(h>1560&&h<1770&&this.blockers.find(b=>b.id==='vines').on){ const a=this.nearest(this.arches,40); if(a) return {label:'Enter',fn:()=>this.chooseArch(a)}; }
+    const cv=this.nearest(this.carvings.filter(c=>!c.read),50); if(cv) return {label:'Examine',fn:()=>this.readCarving(cv)};
+    if(this.blockers.find(b=>b.id==='templeGate').on){ const d=this.nearest(this.doors,34); if(d) return {label:'Open door',fn:()=>this.openDoor(d)}; }
+    if(!this.pathChoice&&Math.abs(h-6050)<70&&this.blockers.find(b=>b.id==='crossroads').on) return {label:'Choose path',fn:()=>this.choosePath()};
+    if(this.pathChoice==='right'){ const hp=this.nearest(this.helpers.filter(x=>!x.done),50); if(hp) return {label:hp.kind==='basket'?`Pick up (${hp.count}/3)`:hp.kind==='kite'?'Get the kite':'Share light',fn:()=>this.helpPerson(hp)}; }
+    return null;
+  }
+  doAction(){ if(this.talking||this.paused||this.mode!=='walk') return; const a=this.contextAction(); if(a){ sfx('tap'); a.fn(); } }
+  chooseArch(a){
+    if(a.i===this.forkTrue){ sfx('grow'); const v=this.blockers.find(b=>b.id==='vines'); v.on=false; this.tweens.add({targets:this.vines,alpha:0,y:-40,duration:700}); this.say([{who:'Rama',text:'You followed the light, not the fear. Keep going.'}]); }
+    else { this.wrongPaths++; this.light=Math.max(0.15,this.light-0.1); sfx('hit'); this.cameras.main.fadeOut(300,0,0,0); this.cameras.main.once('camerafadeoutcomplete',()=>{ this.hero.x=1470; this.cameras.main.fadeIn(400,0,0,0); this.say([{who:'Whisper',text:'\u201cThis path only leads back\u2026 turn around\u2026\u201d',col:0x7c3aed},{who:'Rama',text:'The forest turned you around. Look for the fireflies.'}]); }); }
+  }
+  readCarving(cv){
+    cv.read=true; sfx('count'); this.tweens.add({targets:cv.gl,alpha:0.6,duration:400}); this.tweens.add({targets:cv.sym,alpha:1,duration:400});
+    const n=this.carvings.filter(c=>c.read).length;
+    this.say([{who:`Carving ${n} of 3`,text:this.clues[cv.i]}]);
+    this.objTxt.setText(n<3?`Carvings read: ${n}/3`:'Choose the true door');
+  }
+  openDoor(d){
+    const read=this.carvings.filter(c=>c.read).length;
+    if(read<3){ this.say([{who:'Temple',text:`The doors stay sealed. Read every carving first (${read}/3).`}]); return; }
+    if(d.i===this.doorTrue){ sfx('grow'); this.tweens.add({targets:d.gl,alpha:0.95,scale:2.6,duration:500}); this.blockers.find(b=>b.id==='templeGate').on=false; this.tweens.add({targets:this.gate,alpha:0,duration:600}); this.objTxt.setText('Walk through the open way'); }
+    else { this.wrongDoors++; sfx('hit'); this.cameras.main.shake(300,0.015); this.tweens.add({targets:this.hero,x:this.hero.x-180,duration:400,ease:'Quad.out'}); this.say([{who:'Temple',text:'The wrong door rumbles and pushes you back. Read the clues again.'}]); }
+  }
+
+  /* ---------- the bridge: coordinate the team ---------- */
+  startBridge(){
+    this.mode='bridge'; this.setCtrlMode('bridge'); this.bridgeT0=this.time.now; this.stones=0; this.waste=0; this.built=0; this.nextWave=this.time.now+11000; this.waveWarned=false;
+    this.objTxt.setText('Build all 6 spans to Lanka'); this.updBridgeTxt();
+  }
+  updBridgeTxt(){ this.bridgeTxt.setText(`Spans ${this.built}/6   ·   Stones waiting ${this.stones}/2`); this.stoneStack.clear(); for(let k=0;k<this.stones;k++){ this.stoneStack.fillStyle(0x9ca3af,1); this.stoneStack.fillEllipse(this.headX()-20-k*24,GROUND-10,24,16); } }
+  headX(){ return 4600+this.built*150; }
+  teamAct(r){
+    const card=this.teamCards[r]; if(this.mode!=='bridge'||this.talking||this.paused) return;
+    if(card.busy>this.time.now){ toast(this,`${ROLES[r].name} is busy\u2026`); return; }
+    if(r==='S'){ const todo=this.spans.filter(s=>!s.scouted).slice(0,2); if(!todo.length){ toast(this,'Every rock is already found.'); return; }
+      this.busy(card); const v=this.team.S; const sx=v.x; this.tweens.add({targets:v,x:todo[todo.length-1].x,y:GROUND-60,duration:900,yoyo:true,ease:'Sine.inOut',onComplete:()=>{ v.x=sx; v.y=GROUND-20; }}); tone(660,0.12,'triangle',0.07);
+      this.time.delayedCall(800,()=>todo.forEach(s=>{ s.scouted=true; this.tweens.add({targets:s.fog,alpha:0,duration:300}); this.tweens.add({targets:s.buoy,alpha:0.8,duration:300}); })); }
+    if(r==='H'){ if(this.stones>=2){ toast(this,'Two stones already waiting. Build them first!'); return; }
+      this.busy(card); const v=this.team.H, home=this.headX()-100; this.tweens.add({targets:v,x:home-260,duration:card.dur/2,yoyo:true,onYoyo:()=>tone(330,0.1,'square',0.05),onComplete:()=>{ v.x=home; this.stones++; this.updBridgeTxt(); tone(523,0.1,'triangle',0.07); }}); }
+    if(r==='B'){ if(!this.stones){ toast(this,'No stones waiting. Send the Carrier.'); return; }
+      const s=this.spans[this.built]; this.busy(card); this.stones--; this.updBridgeTxt();
+      if(!s.scouted){ this.waste++; this.time.delayedCall(500,()=>{ sfx('hit'); this.say([{who:'Vanara chief',text:'That rock was hollow and the stone sank! Send the Scout first.',col:0xef4444}]); }); return; }
+      const v=this.team.B, bx=v.x; this.tweens.add({targets:v,x:s.x-40,duration:500,yoyo:true,onComplete:()=>v.x=bx});
+      this.time.delayedCall(600,()=>{ this.buildSpan(s); }); }
+  }
+  busy(card){ card.busy=this.time.now+card.dur; }
+  buildSpan(s){
+    s.built=true; this.built++; sfx('head'); this.cameras.main.shake(120,0.004);
+    const p=this.add.graphics().setDepth(6); p.fillStyle(0x7a5a3a,1); p.fillRect(s.x-75,GROUND-6,150,16); p.fillStyle(0x9ca3af,1); for(let k=0;k<6;k++) p.fillEllipse(s.x-62+k*25,GROUND+12,24,12); p.lineStyle(2,0x4a3320,1); for(let k=-60;k<75;k+=18) p.lineBetween(s.x+k,GROUND-6,s.x+k,GROUND+10);
+    p.setAlpha(0); this.tweens.add({targets:p,alpha:1,duration:250}); s.buoy.setAlpha(0);
+    const hx=this.headX(); [['S',150],['H',100],['B',50]].forEach(([r,o],k)=>this.tweens.add({targets:this.team[r],x:hx-o,duration:500,delay:k*90}));
+    this.updBridgeTxt();
+    if(this.built>=6){ this.mode='walk'; this.setCtrlMode('walk'); this.blockers.find(b=>b.id==='water').on=false; sfx('win');
+      this.bridgeSecs=Math.round((this.time.now-this.bridgeT0)/1000);
+      Object.values(this.team).forEach((v,k)=>this.tweens.add({targets:v,y:v.y-14,duration:250,yoyo:true,repeat:5,delay:k*80}));
+      this.say([{who:'Vanara chief',text:'The bridge stands! Together, nothing is impossible. Cross to the far shore.',col:0xef4444}]); this.objTxt.setText('Cross the bridge'); }
+  }
+  updBridge(){
+    const now=this.time.now;
+    Object.values(this.teamCards).forEach(t=>{ t.ring.clear(); if(t.busy>now){ const f=(t.busy-now)/t.dur; t.ring.lineStyle(4,0xffd36b,1); t.ring.beginPath(); t.ring.arc(42,-34,10,-Math.PI/2,-Math.PI/2+Math.PI*2*f); t.ring.strokePath(); t.c.setAlpha(0.7); } else t.c.setAlpha(1); });
+    if(!this.waveWarned&&now>this.nextWave-2200){ this.waveWarned=true; toast(this,'Big wave coming!'); tone(147,0.5,'sawtooth',0.05); }
+    if(now>this.nextWave){ this.nextWave=now+11000; this.waveWarned=false; this.cameras.main.shake(300,0.008);
+      const wv=this.add.image(this.headX()+200,GROUND-20,'glow').setScale(3,1.2).setTint(0x7dd3fc).setAlpha(0.8).setDepth(9); this.tweens.add({targets:wv,x:this.headX()-200,alpha:0,duration:900,onComplete:()=>wv.destroy()});
+      if(this.stones>0){ this.waste+=this.stones; this.stones=0; this.updBridgeTxt(); toast(this,'The wave washed the waiting stones away!'); sfx('hit'); } }
+  }
+
+  /* ---------- trial complete (in-world) ---------- */
+  trialComplete(key){
+    if(STATE.tokens.includes(key)) return;
+    const t=TRIALS.find(x=>x.key===key), prevT=STATE.tokens.length, prev=headsDown(prevT);
+    STATE.tokens.push(key); STATE.points+=100; const nowT=STATE.tokens.length, now=headsDown(nowT);
+    if(this.rv&&key!=='ravana') while(this.rvLeft>10-now){ const i=this.rv.order[10-this.rvLeft]; this.rv.heads[i].setVisible(false); this.rvLeft--; }
+    const secs=Math.round((Date.now()-(STATE.tStart||Date.now()))/1000);
+    let score, line;
+    if(key==='courage'){ score=this.orbsGot*10+Math.round(this.light*100)-this.wrongPaths*30; line=`Light gathered ${this.orbsGot} · wrong turns ${this.wrongPaths}`; }
+    else if(key==='wisdom'){ score=300-this.wrongDoors*100; line=this.wrongDoors?`Wrong doors ${this.wrongDoors}`:'Opened the true door first try'; }
+    else if(key==='unity'){ score=Math.max(0,400-(this.bridgeSecs||60)*3-this.waste*30); line=`Bridge built in ${this.bridgeSecs||'-'}s · stones lost ${this.waste}`; }
+    else if(key==='righteousness'){ score=this.pathChoice==='right'?this.helped4*100:Math.round(this.coins/2); line=this.pathChoice==='right'?`Village path · helped ${this.helped4}/3`:`Golden road · ${this.coins} coins, nobody helped`; STATE.helped4=this.helped4; }
+    else { score=Math.max(0,this.hp*100-(this.falls||0)*50)+Math.max(0,300-this.misses*100)+(this.mercy?200:0); line=`Hearts left ${this.hp} · ${this.mercy?'showed mercy':'no mercy'}`; }
+    STATE.bests[key]=Math.max(STATE.bests[key]??-999,score); save();
+    track('dussehra_trial_completed',{trial_number:t.id,trial:key,time_taken:secs,score,attempt_count:STATE.attempts[key]||1,first_clear:true});
+    if(t.id===3||t.id===5) track(`dussehra_trial_${t.id}_completed`,{time_taken:secs});
+    this.mode='overlay'; this.moveDir=0;
+    const c=this.fixed(this.add.container(0,0)).setDepth(80);
+    c.add(this.add.rectangle(0,0,W,H,0x000000,0.65).setOrigin(0).setInteractive());
+    const p=this.add.graphics(); p.fillStyle(0x1a0f2e,0.97); p.fillRoundedRect(28,170,W-56,380,24); p.lineStyle(2,0x86efac,0.8); p.strokeRoundedRect(28,170,W-56,380,24); c.add(p);
+    c.add(txt(this,W/2,214,'Trial Complete ✓',30,{display:true,color:'#86efac'}));
+    c.add(txt(this,W/2,250,t.title,17,{bold:true,color:'#ffd27a'}));
+    const tr=drawHeadTracker(this,W/2,298,prev,0.95); c.add(tr.c);
+    const ht=txt(this,W/2,330,`Ravana\u2019s heads defeated · ${prev}/10`,13,{bold:true,color:'#fca5a5'}); c.add(ht);
+    c.add(txt(this,W/2,372,key==='ravana'?'Ravana defeated ✓':`${t.value} ✓`,22,{bold:true,color:'#ffe08a'}));
+    c.add(txt(this,W/2,404,line,13,{color:'#e9d5ff'}));
+    c.add(txt(this,W/2,428,'+100 pts',13,{bold:true,color:'#fde68a'}));
+    this.time.delayedCall(500,()=>{ sfx('head'); if(c.active){ crossHead(this,tr.icons[prev]); if(tr.icons[prev+1]) this.time.delayedCall(250,()=>c.active&&crossHead(this,tr.icons[prev+1])); ht.setText(`Ravana\u2019s heads defeated · ${now}/10`); } this.tracker.c.destroy(); this.tracker=drawHeadTracker(this,W/2,52,now,0.5); this.fixed(this.tracker.c).setDepth(52); });
+    const last=key==='ravana';
+    c.add(button(this,W/2,494,260,54,last?'Celebrate Dussehra':'Continue Journey',()=>{ c.destroy(); if(last){ goTo(this,'Celebration'); return; } this.mode='walk'; this.light=Math.max(this.light,0.6); },{size:18}));
+    sfx('win');
+    const m=CONFIG.milestones[nowT]; if(m) this.time.delayedCall(1300,()=>this.milestone(nowT,m));
+  }
+  milestone(n,m){
+    track('dussehra_reward_viewed',{reward_id:m.id,milestone:n});
+    const c=this.fixed(this.add.container(0,0)).setDepth(85);
+    c.add(this.add.rectangle(0,0,W,H,0x000000,0.6).setOrigin(0).setInteractive());
+    const p=this.add.graphics(); p.fillStyle(0x1a0f2e,0.98); p.fillRoundedRect(44,250,W-88,280,24); p.lineStyle(3,0xffd27a,1); p.strokeRoundedRect(44,250,W-88,280,24); c.add(p);
+    const gift=this.add.graphics(); gift.fillStyle(0xb3123d,1); gift.fillRoundedRect(W/2-26,284,52,40,6); gift.fillStyle(0xe11d48,1); gift.fillRect(W/2-32,275,64,12); gift.fillStyle(0xfacc15,1); gift.fillRect(W/2-5,275,10,49); c.add(gift);
+    c.add(txt(this,W/2,352,'Reward unlocked!',24,{display:true,color:'#ffd27a'}));
+    c.add(txt(this,W/2,386,m.title,16,{bold:true,color:'#fff3d6'}));
+    c.add(txt(this,W/2,412,m.detail,13,{color:'#e9d5ff',wrap:W-120}));
+    c.add(button(this,W/2,478,200,48,'Collect',()=>{ if(!STATE.claimed[m.id]){ STATE.claimed[m.id]=true; save(); track('dussehra_reward_claimed',{reward_id:m.id,milestone:n}); bridge('claimReward',{id:m.id}); } sfx('win'); c.destroy(); },{size:17}));
+  }
+
+  /* ---------- Trial 4: The Two Paths (Lanka outskirts) ---------- */
+  drawLanka(){
+    const g=this.add.graphics().setDepth(1); g.fillStyle(0x3a2418,1); g.fillRect(5900,GROUND,1200,H-GROUND); g.fillStyle(0x5a3a22,1); g.fillRect(5900,GROUND,1200,5);
+    const sp=this.add.graphics().setDepth(4); sp.fillStyle(0x4a3320,1); sp.fillRect(6046,GROUND-120,8,120);
+    sp.fillStyle(0xfacc15,1); sp.fillRoundedRect(6058,GROUND-118,96,26,6); sp.fillStyle(0x65a30d,1); sp.fillRoundedRect(6058,GROUND-84,96,26,6);
+    this.add.text(6106,GROUND-105,'Golden road',{fontFamily:FONT_B,fontSize:'12px',fontStyle:'bold',color:'#3b2a00',resolution:DPR}).setOrigin(0.5).setDepth(5);
+    this.add.text(6106,GROUND-71,'Village path',{fontFamily:FONT_B,fontSize:'12px',fontStyle:'bold',color:'#f0fdf4',resolution:DPR}).setOrigin(0.5).setDepth(5);
+    this.blockers.push({x:6120,on:true,id:'crossroads'});
+    // the golden road: coins, fast, empty
+    this.goldSet=[]; const road=this.add.graphics().setDepth(2); road.fillStyle(0xfacc15,0.35); road.fillRect(6120,GROUND,980,8); this.goldSet.push(road);
+    this.coinsList=[]; for(let x=6170;x<7060;x+=48){ const c=this.add.container(x,GROUND-24-((x/48|0)%2)*30).setDepth(6), cg=this.add.graphics(); cg.fillStyle(0xb45309,1); cg.fillCircle(0,1,9); cg.fillStyle(0xfacc15,1); cg.fillCircle(0,0,8); c.add(cg); this.tweens.add({targets:c,scaleX:0.3,duration:500,yoyo:true,repeat:-1}); this.coinsList.push({x,c,got:false}); this.goldSet.push(c); }
+    // the village path: people who need help
+    this.villageSet=[]; const hs=this.add.graphics().setDepth(1); for(let x=6200;x<7050;x+=210){ hs.fillStyle(0x2a1610,1); hs.fillRect(x,GROUND-110,90,110); hs.fillTriangle(x-8,GROUND-110,x+98,GROUND-110,x+45,GROUND-150); hs.fillStyle(0xffb35c,0.8); hs.fillRect(x+30,GROUND-80,22,22); } this.villageSet.push(hs);
+    const tree=this.add.graphics().setDepth(3); tree.fillStyle(0x4a3320,1); tree.fillRect(6326,GROUND-130,10,130); tree.fillStyle(0x1f4d33,1); tree.fillCircle(6331,GROUND-150,40); this.villageSet.push(tree);
+    const kite=this.add.graphics().setDepth(4); kite.fillStyle(0xe11d48,1); kite.fillPoints([{x:0,y:-14},{x:10,y:0},{x:0,y:14},{x:-10,y:0}],true); kite.setPosition(6350,GROUND-170); this.villageSet.push(kite);
+    const kid=drawPerson(this,6290,GROUND-30,{col:0x60a5fa,hair:0x2a1608}).setScale(0.65).setDepth(5); this.villageSet.push(kid);
+    const dadi=drawPerson(this,6560,GROUND-38,{col:0xa855f7,hair:0xe5e7eb,adult:true}).setScale(0.75).setDepth(5); this.villageSet.push(dadi);
+    const fruit=this.add.graphics().setDepth(5); [[-30,0],[-12,6],[8,2],[26,7],[40,0]].forEach(([dx,dy],k)=>{ fruit.fillStyle([0xf97316,0xef4444,0xfacc15][k%3],1); fruit.fillCircle(6600+dx,GROUND-6+dy*0.4,6); }); fruit.fillStyle(0x92400e,1); fruit.fillEllipse(6640,GROUND-8,26,14); this.villageSet.push(fruit);
+    const vanara=drawVanara(this,'S',6820,GROUND-8,0.9).setDepth(5).setAngle(-70); this.villageSet.push(vanara);
+    this.helpers=[{x:6300,kind:'kite',done:false,need:1,count:0,obj:kite,who:kid},{x:6580,kind:'basket',done:false,need:3,count:0,obj:fruit,who:dadi},{x:6800,kind:'vanara',done:false,need:1,count:0,obj:vanara,who:vanara}];
+    [...this.goldSet,...this.villageSet].forEach(o=>o.setVisible(false));
+    this.coins=0; this.helped4=0; this.pathChoice=STATE.path||null;
+    if(this.n>=4) this.blockers.find(b=>b.id==='crossroads').on=false;
+  }
+  choosePath(){
+    if(this.pathChoice) return;
+    const c=this.fixed(this.add.container(0,0)).setDepth(85);
+    c.add(this.add.rectangle(0,0,W,H,0x000000,0.7).setOrigin(0).setInteractive());
+    const p=this.add.graphics(); p.fillStyle(0x1a0f2e,0.97); p.fillRoundedRect(28,190,W-56,380,24); p.lineStyle(2,C.marigold,0.7); p.strokeRoundedRect(28,190,W-56,380,24); c.add(p);
+    c.add(txt(this,W/2,232,'Two paths to the fortress',24,{display:true,color:'#ffd27a'}));
+    const card=(y,col,head,body,cb)=>{ const k=this.add.container(W/2,y), g=this.add.graphics(); g.fillStyle(col,0.25); g.fillRoundedRect(-150,-52,300,104,16); g.lineStyle(2,col,1); g.strokeRoundedRect(-150,-52,300,104,16);
+      k.add([g,txt(this,0,-22,head,18,{bold:true,color:'#fff3d6'}),txt(this,0,12,body,13,{color:'#e9d5ff',wrap:270})]); k.setSize(300,104).setInteractive({useHandCursor:true}); k.on('pointerdown',()=>{ sfx('tap'); c.destroy(); cb(); }); c.add(k); };
+    card(326,0xfacc15,'The golden road','Easy and fast. Coins all along the way.',()=>this.pickPath('easy'));
+    card(452,0x65a30d,'The village path','Longer. People of Lanka need your help.',()=>this.pickPath('right'));
+  }
+  pickPath(path){
+    this.pathChoice=path; STATE.path=path; STATE.helpedKinds=[]; save(); track('dussehra_path_chosen',{path});
+    this.blockers.find(b=>b.id==='crossroads').on=false;
+    (path==='easy'?this.goldSet:this.villageSet).forEach(o=>{ o.setVisible(true); o.setAlpha(0); this.tweens.add({targets:o,alpha:1,duration:500}); });
+    this.objTxt.setText(path==='easy'?'Follow the golden road to the fortress':'Help the people of Lanka on your way');
+    this.say([{who:'Rama',text:path==='easy'?'The golden road it is. Remember: every path leaves footprints.':'The longer road. Help whoever you can.'}]);
+  }
+  helpPerson(hp){
+    hp.count++;
+    if(hp.kind==='basket'&&hp.count<hp.need){ tone(523+hp.count*80,0.1,'triangle',0.07); this.tweens.add({targets:hp.obj,y:hp.obj.y-3,duration:80,yoyo:true}); return; }
+    hp.done=true; this.helped4++; STATE.helpedKinds=[...(STATE.helpedKinds||[]),hp.kind]; save(); sfx('grow');
+    const e=this.add.particles(hp.x,GROUND-60,'spark',{speed:{min:40,max:130},lifespan:800,scale:{start:1.2,end:0},tint:0xfda4af,blendMode:'ADD',emitting:false}).setDepth(20); e.explode(24); this.time.delayedCall(900,()=>e.destroy());
+    if(hp.kind==='kite'){ this.tweens.add({targets:hp.obj,x:6296,y:GROUND-58,duration:700,ease:'Quad.in'}); this.say([{who:'Little Chintu',text:'My kite! Thank you, thank you!'}]); }
+    if(hp.kind==='basket'){ hp.obj.clear(); hp.obj.fillStyle(0x92400e,1); hp.obj.fillEllipse(6600,GROUND-10,30,18); hp.obj.fillStyle(0xf97316,1); hp.obj.fillCircle(6594,GROUND-20,6); hp.obj.fillStyle(0xfacc15,1); hp.obj.fillCircle(6606,GROUND-21,6); this.say([{who:'Dadi',text:'Bless you, child. My blessing will shield you today.'}]); }
+    if(hp.kind==='vanara'){ this.tweens.add({targets:hp.obj,angle:0,y:GROUND-20,duration:600}); this.say([{who:'Vanara scout',text:'Your light woke me! I\u2019ll bring the army to fight beside you.',col:0x60a5fa}]); }
+    this.objTxt.setText(`Helped ${this.helped4}/3 · keep going to the fortress`);
+  }
+
+  /* ---------- Trial 5: Ravana's Fortress ---------- */
+  drawFortress(){
+    const g=this.add.graphics().setDepth(1); g.fillStyle(0x24140f,1); g.fillRect(7100,GROUND,1100,H-GROUND); g.fillStyle(0x3b1d16,1); g.fillRect(7100,GROUND,1100,5);
+    g.fillStyle(0x3b0d0d,1); g.fillRect(7380,180,820,GROUND-180); for(let x=7380;x<8200;x+=46) g.fillRect(x,156,28,28);
+    g.fillStyle(0x2a0808,1); for(let y=210;y<GROUND;y+=34) g.fillRect(7380,y,820,3);
+    [7420,7700].forEach(x=>{ g.fillStyle(0x4a3320,1); g.fillRect(x-4,GROUND-60,8,60); this.add.image(x,GROUND-70,'glow').setScale(0.9).setTint(0xff6b2b).setAlpha(0.8).setBlendMode('ADD').setDepth(2); });
+    const s=1.9, rx=7800, ry=GROUND-62*s;
+    this.rvGlow=this.add.image(rx,ry-130,'glow').setScale(3.4).setTint(0xb3123d).setAlpha(0.4).setBlendMode('ADD').setDepth(3);
+    this.rv=drawRavana(this,rx,ry,10-Math.min(8,this.n*2),{color:0x3a1036,eye:0xff4d4d}); this.rv.c.setScale(s).setDepth(4);
+    this.rvLeft=10-Math.min(8,this.n*2);
+    this.tweens.add({targets:this.rv.c,scaleY:s*1.02,duration:1300,yoyo:true,repeat:-1,ease:'Sine.inOut'});
+    this.blockers.push({x:7690,on:true,id:'ravana'});
+    this.fireballs=[];
+  }
+  rvRemoveHead(){
+    if(this.rvLeft<=0) return; const i=this.rv.order[10-this.rvLeft], h=this.rv.heads[i], m=h.getWorldTransformMatrix(); this.rvLeft--;
+    sfx('head'); this.cameras.main.shake(300,0.014); this.tracker.c.destroy(); this.tracker=drawHeadTracker(this,W/2,52,10-this.rvLeft,0.5); this.fixed(this.tracker.c).setDepth(52);
+    const e=this.add.particles(m.tx,m.ty,'spark',{speed:{min:60,max:240},lifespan:900,scale:{start:1.5,end:0},tint:0xff6b3b,blendMode:'ADD',emitting:false}).setDepth(20); e.explode(40); this.time.delayedCall(1000,()=>e.destroy());
+    this.tweens.add({targets:h,scale:2,alpha:0,y:h.y-30,duration:600,ease:'Quad.in',onComplete:()=>h.setVisible(false)});
+  }
+  startBattle(){
+    this.mode='battle'; this.phase=1; this.bt=0; this.inv=0; this.fireT=1400; this.marks=[]; this.btnA.setVisible(false);
+    const hk=STATE.helpedKinds||[], blessed=this.pathChoice==='right'&&hk.includes('basket'), army=this.pathChoice==='right'&&hk.includes('vanara');
+    this.hpMax=3+(blessed?1:0); this.hp=this.hpMax; this.army=army; this.misses=0;
+    this.hpIcons=[]; for(let k=0;k<this.hpMax;k++) this.hpIcons.push(this.fixed(drawSymbol(this,'heart',28+k*24,120,10,0x000000)).setDepth(52));
+    const lines=[{who:'Ravana',text:'A child dares to stand before me? Burn!',col:0xb3123d}];
+    if(blessed) lines.push({who:'Dadi\u2019s blessing',text:'A warm light surrounds you. +1 heart.',col:0xfda4af});
+    if(this.pathChoice==='easy') lines.push({who:'Rama',text:'You came by the golden road, so you face him alone. Stay brave.'});
+    this.say(lines);
+    this.objTxt.setText('Phase 1 · Dodge the fire · walk and jump');
+  }
+  setHearts(){ this.hpIcons.forEach((ic,k)=>ic.setAlpha(k<this.hp?1:0.15)); }
+  updBattle(dt){
+    if(this.talking||this.paused) return;
+    const h=this.hero;
+    if(this.phase===1){
+      this.bt+=dt; this.fireT-=dt*1000;
+      if(this.fireT<=0){ this.fireT=Math.max(800,1150-this.bt*30);
+        const sx=7800-66*1.9, sy=GROUND-62*1.9-40, tx=Phaser.Math.Clamp(Math.random()<0.65?h.x+Phaser.Math.Between(-30,30):Phaser.Math.Between(7450,7660),7450,7660), T=1.35, gy=420;
+        const mk=this.add.ellipse(tx,GROUND-2,46,12,0xef4444,0.55).setDepth(9); this.tweens.add({targets:mk,scaleX:0.4,alpha:0.9,duration:T*1000}); 
+        const o=this.add.container(sx,sy).setDepth(15); o.add([this.add.image(0,0,'glow').setScale(0.5).setTint(0xff6b2b).setBlendMode('ADD'),this.add.image(0,0,'dot').setScale(0.8).setTint(0xffd36b)]);
+        this.fireballs.push({o,mk,vx:(tx-sx)/T,vy:((GROUND-14-sy)-0.5*gy*T*T)/T,g:gy}); tone(160,0.12,'sawtooth',0.04); }
+      for(let i=this.fireballs.length-1;i>=0;i--){ const f=this.fireballs[i]; f.vy+=f.g*dt; f.o.x+=f.vx*dt; f.o.y+=f.vy*dt;
+        if(this.inv<=0&&Math.abs(f.o.x-h.x)<20&&Math.abs(f.o.y-(h.y-35))<34){ f.o.destroy(); f.mk.destroy(); this.fireballs.splice(i,1); this.hp--; this.inv=1; this.setHearts(); sfx('hit'); this.cameras.main.shake(200,0.012); this.cameras.main.flash(150,160,30,0);
+          if(this.hp<=0){ this.fireballs.forEach(x=>{ x.o.destroy(); x.mk.destroy(); }); this.fireballs=[]; this.hp=this.hpMax; this.falls=(this.falls||0)+1; this.setHearts(); this.say([{who:'Rama',text:'Courage is getting back up. Watch the red marks on the ground, and step away from them.'}]); } continue; }
+        if(f.o.y>=GROUND-10){ const e=this.add.particles(f.o.x,GROUND-6,'spark',{speed:{min:30,max:110},lifespan:400,scale:{start:1,end:0},tint:0xff6b2b,blendMode:'ADD',emitting:false}).setDepth(15); e.explode(10); this.time.delayedCall(500,()=>e.destroy()); f.o.destroy(); f.mk.destroy(); this.fireballs.splice(i,1); } }
+      if(this.inv>0){ this.inv-=dt; this.heroBody.setAlpha(Math.floor(this.inv*12)%2?0.35:1); if(this.inv<=0) this.heroBody.setAlpha(1); }
+      this.objTxt.setText(`Phase 1 · Avoid the red marks · ${Math.max(0,Math.ceil(10-this.bt))}s`);
+      if(this.bt>=10){ this.fireballs.forEach(x=>{ x.o.destroy(); x.mk.destroy(); }); this.fireballs=[]; this.heroBody.setAlpha(1); this.rvRemoveHead(); this.phase=2; this.time.delayedCall(900,()=>this.startBow()); this.phase=1.5; }
+    }
+    if(this.phase===2){
+      if(this.drawingBow){ this.power+=this.pdir*dt*1.2; if(this.power>=1){ this.power=1; this.pdir=-1; } if(this.power<=0){ this.power=0; this.pdir=1; } }
+      this.mark.y=this.mtop+(1-this.power)*220;
+    }
+  }
+  startBow(){
+    this.phase=2; this.power=0; this.pdir=1; this.drawingBow=false; this.barrierHp=3;
+    this.zone=this.army?[0.62,0.95]:[0.72,0.92];
+    this.barrier=this.add.container(7800,GROUND-300).setDepth(6); const bg=this.add.graphics(); bg.fillStyle(0xe2582b,0.2); bg.fillEllipse(0,0,170,120); bg.lineStyle(4,0xffb020,0.9); bg.strokeEllipse(0,0,170,120);
+    this.cracks=this.add.graphics(); this.barrier.add([this.add.image(0,0,'glow').setScale(2,1.4).setTint(0xff6b2b).setAlpha(0.4).setBlendMode('ADD'),bg,this.cracks]); this.tweens.add({targets:this.barrier,alpha:0.7,duration:500,yoyo:true,repeat:-1});
+    this.mtop=300; const m=this.fixed(this.add.graphics()).setDepth(56); m.fillStyle(0x000000,0.5); m.fillRoundedRect(W-44,this.mtop-10,28,240,10); m.fillStyle(0x2a1d36,1); m.fillRoundedRect(W-38,this.mtop,16,220,8); m.fillStyle(0xf6a623,1); m.fillRect(W-38,this.mtop+(1-this.zone[1])*220,16,(this.zone[1]-this.zone[0])*220); this.meterG=m;
+    this.mark=this.fixed(this.add.rectangle(W-30,this.mtop+220,28,5,0xffffff)).setDepth(57);
+    this.walkCtrls.forEach(o=>o.setVisible(false));
+    const b=this.fixed(this.add.container(W/2,712)).setDepth(58), bg2=this.add.graphics(); bg2.fillStyle(0xf6a623,1); bg2.fillRoundedRect(-120,-30,240,60,30); b.add([bg2,txt(this,0,0,'Hold to draw · release',17,{bold:true,color:'#2a1206'})]);
+    b.setSize(240,60).setInteractive({useHandCursor:true}); b.on('pointerdown',()=>{ ac(); if(!this.arrowFly) this.drawingBow=true; }); this.bowBtn=b;
+    this.input.on('pointerup',()=>{ if(this.phase===2&&this.drawingBow) this.releaseBow(); });
+    this.input.keyboard?.on('keydown-SPACE',()=>{ if(this.phase===2&&!this.arrowFly) this.drawingBow=true; });
+    this.input.keyboard?.on('keyup-SPACE',()=>{ if(this.phase===2&&this.drawingBow) this.releaseBow(); });
+    const lines=[{who:'Rama',text:'He hides behind a shield of fire. Draw your bow and release in the gold zone. Three true arrows.'}];
+    if(this.army) lines.push({who:'Vanara scout',text:'The army is here! We\u2019ll fire with you. Your aim will be steadier.',col:0x60a5fa});
+    this.say(lines); this.objTxt.setText('Phase 2 · Break the shield · 3 true arrows');
+    if(this.army) ['B','H','W'].forEach((r,k)=>{ const v=drawVanara(this,r,7450+k*30,GROUND-20,0.75).setDepth(9); this.tweens.add({targets:v,y:GROUND-30,duration:300,yoyo:true,repeat:-1,delay:k*90}); });
+  }
+  releaseBow(){
+    this.drawingBow=false; if(this.arrowFly) return;
+    const hit=this.power>=this.zone[0]&&this.power<=this.zone[1], pw=this.power; this.power=0; this.arrowFly=true;
+    const tx=hit?7800+Phaser.Math.Between(-40,40):7800+Phaser.Math.Between(-200,120), ty=hit?GROUND-300:(pw>this.zone[1]?80:GROUND-120);
+    const a=this.add.container(this.hero.x+12,this.hero.y-50).setDepth(16), ag=this.add.graphics(); ag.lineStyle(3,0xfff3d6,1); ag.lineBetween(-20,0,10,0); ag.fillStyle(0xffe08a,1); ag.fillTriangle(10,-5,10,5,20,0); a.add([this.add.image(0,0,'glow').setScale(0.4).setTint(0xffd36b).setBlendMode('ADD'),ag]);
+    a.setRotation(Math.atan2(ty-a.y,tx-a.x)); tone(hit?880:440,0.25,'triangle',0.1);
+    this.tweens.add({targets:a,x:tx,y:ty,duration:350,ease:'Quad.in',onComplete:()=>{ a.destroy(); this.arrowFly=false;
+      if(hit){ this.barrierHp--; sfx('hit'); this.cameras.main.shake(200,0.012); const c=this.cracks; c.lineStyle(3,0xfff3d6,0.95); for(let k=0;k<4;k++){ let x=tx-7800, y=ty-(GROUND-300); c.beginPath(); c.moveTo(x,y); for(let j=0;j<4;j++){ x+=Phaser.Math.Between(-22,22); y+=Phaser.Math.Between(-16,16); c.lineTo(x,y); } c.strokePath(); }
+        if(this.barrierHp<=0){ this.phase=3; this.tweens.killTweensOf(this.barrier); this.tweens.add({targets:this.barrier,alpha:0,scale:1.4,duration:500,onComplete:()=>this.barrier.destroy()}); sfx('head');
+          [this.meterG,this.mark,this.bowBtn].forEach(o=>o.destroy()); this.time.delayedCall(700,()=>this.finalDecision()); }
+        else this.objTxt.setText(`Phase 2 · The shield cracks! ${this.barrierHp} more`); }
+      else { this.misses++; sfx('hit'); this.objTxt.setText(pw>this.zone[1]?'Too much force. Release a little earlier.':'Draw a little longer, then release.'); } }});
+  }
+  finalDecision(){
+    this.objTxt.setText('Phase 3 · The final decision');
+    this.say([{who:'Ravana\u2019s soldiers',text:'We throw down our weapons. We only followed orders. Please, let us go home.',col:0x9ca3af}],()=>{
+      const c=this.fixed(this.add.container(0,0)).setDepth(85);
+      c.add(this.add.rectangle(0,0,W,H,0x000000,0.7).setOrigin(0).setInteractive());
+      const p=this.add.graphics(); p.fillStyle(0x1a0f2e,0.97); p.fillRoundedRect(28,230,W-56,300,24); c.add(p);
+      c.add(txt(this,W/2,272,'What do you do?',24,{display:true,color:'#ffd27a'}));
+      const end=(mercy)=>{ c.destroy(); this.mercy=mercy; track('dussehra_final_decision',{mercy});
+        this.say([{who:mercy?'Rama':'Rama',text:mercy?'Giving shelter to those who surrender is the way of dharma. Now, end this.':'Victory without mercy is another kind of cruelty. Remember that. Now, end this.'}],()=>this.ravanaFalls()); };
+      c.add(button(this,W/2,350,290,52,'Let them go home in peace',()=>end(true),{size:16,color:0x93c5fd,text:'#0f172a'}));
+      c.add(button(this,W/2,418,290,46,'Punish every one of them',()=>end(false),{size:15,color:0x7f1d1d,text:'#fff3d6'}));
+    });
+  }
+  ravanaFalls(){
+    this.rvRemoveHead(); this.phase=4;
+    this.time.delayedCall(900,()=>{ this.cameras.main.flash(700,255,240,200); sfx('win'); this.tweens.killTweensOf(this.rv.c);
+      this.tweens.add({targets:this.rv.c,angle:12,y:this.rv.c.y+80,alpha:0,duration:1600,ease:'Quad.in'}); this.tweens.add({targets:this.rvGlow,alpha:0,duration:1200});
+      const t=this.fixed(txt(this,W/2,330,'Goodness\nprevails.',44,{display:true,color:'#ffd27a',stroke:'#2a0f2e',strokeW:8})).setDepth(60).setAlpha(0).setScale(0.5);
+      this.tweens.add({targets:t,alpha:1,scale:1,duration:700,delay:800,ease:'Back.out'});
+      this.time.delayedCall(3000,()=>{ t.destroy(); this.trialComplete('ravana'); }); });
+  }
+  /* ---------- the loop ---------- */
+  update(time,delta){
+    if(!this.hero) return;
+    const dt=Math.min(delta,50)/1000, h=this.hero;
+    // movement
+    let dir=0; if((this.mode==='walk'||(this.mode==='battle'&&this.phase===1))&&!this.talking&&!this.paused) dir=this.moveDir||this.kDir||0;
+    const vx=dir*175; if(dir) this.face=dir; this.heroBody.setScale(0.8*this.face,0.8); this.lamp.x=16*this.face;
+    let nx=h.x+vx*dt;
+    this.blockers.forEach(b=>{ if(!b.on) return; if(h.x<=b.x&&nx>b.x-14) nx=b.x-14; });
+    h.x=Phaser.Math.Clamp(nx,this.mode==='battle'?7440:30,this.mode==='battle'?7670:WORLD_W-30);
+    if(this.air||this.vy<0){ this.vy+=1100*dt; h.y+=this.vy*dt; if(h.y>=GROUND){ h.y=GROUND; this.vy=0; this.air=false; } }
+    if(dir&&!this.air) this.heroBody.y=-35+Math.abs(Math.sin(time/90))*-3;
+    // camera
+    const cam=this.cameras.main, camT=this.mode==='bridge'?this.headX()-W*0.42:this.mode==='battle'?7420:h.x-W*0.38; cam.scrollX+=((Phaser.Math.Clamp(camT,0,WORLD_W-W))-cam.scrollX)*Math.min(1,dt*(this.mode==='bridge'?3:6));
+    // skies
+    const seg=segAt(h.x); SEGS.forEach(s=>{ const near=h.x>=s.x0-150&&h.x<s.x1+150?1-Math.max(0,Math.max(s.x0-h.x,h.x-s.x1))/150:0; this.skies[s.key].setAlpha(Phaser.Math.Clamp(near,0,1)); });
+    this.sun.setAlpha(seg.key==='ocean'?0.6:seg.key==='temple'?0.3:0);
+    if(seg!==this.lastSeg){ this.lastSeg=seg; this.areaTxt.setText(seg.trial?`Trial ${TRIALS.find(t=>t.key===seg.trial).id} · ${seg.name}`:seg.name); }
+    // triggers
+    if(!this.talking&&this.mode==='walk') this.triggers.forEach(t=>{ if(!t.done&&h.x>=t.x){ t.done=true; t.fn(); } });
+    // context action button
+    if(this.mode==='walk'&&!this.talking){ const a=this.contextAction(); this.btnA.setVisible(!!a); if(a) this.btnA.label.setText(a.label); }
+    // forest: light, orbs, thorns, whispers of doubt
+    const inForest=h.x>760&&h.x<2620;
+    this.orbs.forEach(o=>{ if(!o.got&&Math.abs(o.x-h.x)<26&&Math.abs(o.y-(h.y-35))<44){ o.got=true; this.orbsGot++; this.light=Math.min(1,this.light+0.08); o.o.destroy(); o.c.destroy(); tone(990,0.08,'sine',0.07); } });
+    if(this.hurtT>0) this.hurtT-=dt;
+    this.thorns.forEach(t=>{ if(this.hurtT<=0&&Math.abs(t.x-h.x)<24&&h.y>GROUND-30){ this.hurtT=1; this.light=Math.max(0.15,this.light-0.12); sfx('hit'); this.cameras.main.shake(150,0.008); h.x-=60*this.face; } });
+    if(inForest&&this.mode==='walk'&&!this.talking&&!this.paused){ this.wispT=(this.wispT||2.5)-dt; if(this.wispT<=0){ this.wispT=2.6+Math.random()*1.4; this.spawnWisp(); } }
+    for(let i=this.wisps.length-1;i>=0;i--){ const w=this.wisps[i]; if(this.talking||this.paused) continue; const dx=h.x-w.o.x, dy=(h.y-50)-w.o.y, d=Math.hypot(dx,dy);
+      w.o.x+=dx/d*70*dt; w.o.y+=dy/d*70*dt+Math.sin(time/200+i)*0.6; w.t.setPosition(w.o.x,w.o.y-26);
+      if(d<26){ this.light=Math.max(0.15,this.light-0.12); sfx('hit'); this.killWisp(i,false); } }
+    this.lightBar.width=62*this.light; [this.lightLbl,this.lightBg,this.lightBar].forEach(o=>o.setVisible(inForest));
+    // darkness
+    const dk=h.x<760?Phaser.Math.Clamp((h.x-640)/120,0,1):h.x>2560?Phaser.Math.Clamp((2680-h.x)/120,0,1):1;
+    this.dark.clear(); if(dk>0.01&&h.x<2700){ this.dark.fill(0x010403,0.92*dk); this.stamp.setScale((70+130*this.light)/38).setPosition(h.x-cam.scrollX,h.y-40); this.dark.erase(this.stamp); this.dark.erase(this.stamp); }
+    if(this.mode==='bridge') this.updBridge();
+    if(this.mode==='battle') this.updBattle(dt);
+    // golden-road coins
+    if(this.pathChoice==='easy') this.coinsList.forEach(c=>{ if(!c.got&&Math.abs(c.x-h.x)<24&&Math.abs(c.c.y-(h.y-35))<46){ c.got=true; this.coins+=5; c.c.destroy(); tone(1320,0.06,'square',0.04); } });
+    this.coinHud.setText(seg.key==='lanka'&&this.pathChoice==='easy'?`Coins ${this.coins}`:'');
+  }
+  spawnWisp(){
+    const side=Math.random()<0.7?1:-1, cam=this.cameras.main, x=cam.scrollX+(side>0?W+20:-20), y=GROUND-80-Math.random()*120;
+    const o=this.add.image(x,y,'glow').setScale(0.55).setTint(0x7c3aed).setBlendMode('ADD').setDepth(32).setInteractive({useHandCursor:true});
+    const t=this.add.text(x,y-26,Phaser.Utils.Array.GetRandom(['turn back…','too dark…','you can’t…','go home…']),{fontFamily:FONT_B,fontSize:'12px',color:'#c4b5fd',resolution:DPR}).setOrigin(0.5).setDepth(32);
+    const w={o,t}; this.wisps.push(w); o.on('pointerdown',()=>{ const i=this.wisps.indexOf(w); if(i>=0) this.killWisp(i,true); });
+  }
+  killWisp(i,byTap){ const w=this.wisps[i]; this.wisps.splice(i,1); if(byTap){ tone(1200,0.1,'sine',0.06); const e=this.add.particles(w.o.x,w.o.y,'spark',{speed:{min:40,max:120},lifespan:500,scale:{start:1,end:0},tint:0xfde68a,blendMode:'ADD',emitting:false}).setDepth(33); e.explode(14); this.time.delayedCall(600,()=>e.destroy()); } w.o.destroy(); w.t.destroy(); }
+}
+
+/* ---------- Dussehra finale ---------- */
+class Celebration extends Phaser.Scene{
+  constructor(){ super('Celebration'); }
+  create(){
+    this.cameras.main.fadeIn(700,255,240,200);
+    STATE.champion=true; save();
+    gradTex(this,'festBg',[[0,'#1e1b4b'],[0.5,'#9a3412'],[0.74,'#2a1608'],[1,'#120a06']]);
+    this.add.image(0,0,'festBg').setOrigin(0); stars(this,40,260); stringLights(this,170,26);
+    const g=this.add.graphics(); g.fillStyle(0x1f1208,1); g.fillRect(0,640,W,H-640);
+    const ef=drawRavana(this,66,650,10,{color:0x7c2d12,eye:0xffd36b}); ef.c.setScale(0.62);
+    this.add.particles(0,0,'spark',{x:{min:30,max:104},y:{min:560,max:660},lifespan:1100,speedY:{min:-120,max:-50},speedX:{min:-15,max:15},scale:{start:1.6,end:0},tint:[0xff6b2b,0xffb020,0xffe08a],frequency:30,blendMode:'ADD'});
+    this.tweens.add({targets:ef.c,alpha:0.25,duration:9000});
+    drawTree(this,W-62,690,4,{glow:true,lights:10}).setScale(0.62);
+    drawRama(this,W/2,600,1);
+    ['B','H','W','S','B','H'].forEach((ro,k)=>{ const x=40+k*62, v=drawVanara(this,ro,x,724,0.62); this.tweens.add({targets:v,y:712,duration:300+k*40,yoyo:true,repeat:-1,ease:'Sine.inOut',delay:k*80}); });
+    this.time.addEvent({delay:420,loop:true,callback:()=>{ const x=Phaser.Math.Between(40,W-40), y=Phaser.Math.Between(60,250), tint=Phaser.Utils.Array.GetRandom([0xff6b6b,0xffd166,0x7bdff2,0xf7aef8,0xb9fbc0,0xffffff]);
+      const e=this.add.particles(x,y,'spark',{speed:{min:60,max:200},lifespan:1100,gravityY:90,scale:{start:1.3,end:0},tint,blendMode:'ADD',emitting:false}); e.explode(46); this.time.delayedCall(1300,()=>e.destroy()); tone(Phaser.Math.Between(600,1200),0.12,'sine',0.03); }});
+    [0,0.15,0.3].forEach(w=>[523,659,784,1046].forEach((f,i)=>tone(f,0.5,'triangle',0.07,w+i*0.14)));
+    const t1=txt(this,W/2,300,'VICTORY OF\nGOOD OVER EVIL',38,{display:true,color:'#ffd27a',stroke:'#2a0f2e',strokeW:8,lineSpacing:-4}).setScale(0.5).setAlpha(0).setDepth(30);
+    this.tweens.add({targets:t1,scale:1,alpha:1,duration:800,delay:600,ease:'Back.out'});
+    const t2=txt(this,W/2,380,'You completed the Trials of Ravana.',17,{bold:true,color:'#fff3d6',stroke:'#2a0f2e',strokeW:4}).setAlpha(0).setDepth(30);
+    this.tweens.add({targets:t2,alpha:1,duration:600,delay:1500});
+    const b=button(this,W/2,450,300,54,'Your Dussehra reward is ready',()=>goTo(this,'Champion'),{size:17}).setDepth(31).setAlpha(0);
+    this.tweens.add({targets:b,alpha:1,duration:500,delay:2300,onComplete:()=>this.tweens.add({targets:b,scale:1.04,duration:700,yoyo:true,repeat:-1})});
+  }
+}
+
+/* ---------- Final reward: Dussehra Champion ---------- */
+class Champion extends Phaser.Scene{
+  constructor(){ super('Champion'); }
+  create(){
+    this.cameras.main.fadeIn(400,15,8,32);
+    const R=CONFIG.finalReward; track('dussehra_reward_viewed',{reward_id:R.id,milestone:10});
+    gradTex(this,'champBg',[[0,'#1e1b4b'],[0.55,'#4a1d4f'],[1,'#1a0806']]);
+    this.add.image(0,0,'champBg').setOrigin(0); stars(this,50,H);
+    this.time.addEvent({delay:900,loop:true,callback:()=>{ const e=this.add.particles(Phaser.Math.Between(40,W-40),Phaser.Math.Between(40,160),'spark',{speed:{min:50,max:160},lifespan:1000,gravityY:80,scale:{start:1.1,end:0},tint:Phaser.Utils.Array.GetRandom([0xffd166,0xf7aef8,0x7bdff2]),blendMode:'ADD',emitting:false}); e.explode(30); this.time.delayedCall(1200,()=>e.destroy()); }});
+    txt(this,W/2,72,'DUSSEHRA CHAMPION',32,{display:true,color:'#ffd27a',stroke:'#2a0f2e',strokeW:6});
+    txt(this,W/2,110,`${TOTAL}/${TOTAL} Trials Completed`,16,{bold:true,color:'#fff3d6'});
+    drawHeadTracker(this,W/2,148,10,0.85);
+    const c=this.add.container(W/2,316), g=this.add.graphics();
+    g.fillStyle(0x000000,0.35); g.fillRoundedRect(-165,-120,330,250,22); g.fillStyle(0x1a0f2e,0.97); g.fillRoundedRect(-165,-126,330,250,22); g.lineStyle(3,0xffd27a,1); g.strokeRoundedRect(-165,-126,330,250,22);
+    const gift=this.add.graphics(); gift.fillStyle(0xb3123d,1); gift.fillRoundedRect(-30,-92,60,46,6); gift.fillStyle(0xe11d48,1); gift.fillRect(-36,-102,72,14); gift.fillStyle(0xfacc15,1); gift.fillRect(-5,-102,10,56); gift.fillEllipse(-12,-108,18,10); gift.fillEllipse(12,-108,18,10);
+    const gl=this.add.image(0,-70,'glow').setScale(1.4).setTint(0xffd36b).setAlpha(0.5).setBlendMode('ADD'); this.tweens.add({targets:gl,alpha:0.2,duration:800,yoyo:true,repeat:-1});
+    this.codeTxt=txt(this,0,78,'',15,{bold:true,color:'#86efac'});
+    c.add([g,gl,gift,txt(this,0,-20,'Your Dussehra Reward',15,{bold:true,color:'#c4b5d6'}),txt(this,0,10,R.title,20,{display:true,color:'#ffd27a',wrap:290}),txt(this,0,44,R.detail,14,{color:'#fff3d6',wrap:290}),this.codeTxt]);
+    const claimed=()=>{ this.codeTxt.setText(R.code?`Claimed ✓  ·  code ${R.code}`:'Claimed ✓'); };
+    if(STATE.claimed[R.id]) claimed();
+    this.claimBtn=button(this,W/2,494,300,58,STATE.claimed[R.id]?'REWARD CLAIMED ✓':'CLAIM REWARD',()=>{
+      if(STATE.claimed[R.id]){ toast(this,'Already claimed. Enjoy!'); return; }
+      STATE.claimed[R.id]=true; save(); track('dussehra_reward_claimed',{reward_id:R.id,milestone:10}); bridge('claimReward',{id:R.id,code:R.code});
+      claimed(); this.claimBtn.label.setText('REWARD CLAIMED ✓'); sfx('win'); this.cameras.main.flash(300,255,230,160); },{size:19});
+    txt(this,W/2,560,`Continue your journey with ${CONFIG.brand}.`,14,{color:'#e9d5ff'});
+    button(this,W/2,606,300,50,`EXPLORE ${CONFIG.brand.toUpperCase()}`,()=>{ track('dussehra_astrolive_cta_clicked',{source:'champion'}); if(!bridge('openAstrolive',{source:'dussehra_champion'})) goTo(this,'AstroHome'); },{size:17,color:0x7c3aed,text:'#ffffff'});
+    button(this,W/2,668,300,44,'Share your journey',()=>goTo(this,'Share'),{size:15,color:0x3a2350,text:'#fff3d6'});
+    const back=txt(this,W/2,726,'Replay the journey',13,{color:'#c4b5d6'}).setInteractive({useHandCursor:true}); back.on('pointerdown',()=>{ STATE.tokens=[]; STATE.path=null; STATE.helpedKinds=[]; save(); goTo(this,'Journey'); });
+  }
+}
+
+/* ---------- Shareable journey card ---------- */
+class Share extends Phaser.Scene{
+  constructor(){ super('Share'); }
+  create(){
+    this.cameras.main.fadeIn(300,15,8,32);
+    this.add.rectangle(0,0,W,H,0x0f0820).setOrigin(0);
+    const n=STATE.tokens.length, x0=24, y0=56, w=W-48, h=584; this.card={x0,y0,w,h};
+    gradTex(this,'shareBg',[[0,'#2e1065'],[0.5,'#7c2d12'],[1,'#1a0806']]);
+    const bgi=this.add.image(0,0,'shareBg').setOrigin(0); const mk=this.make.graphics({x:0,y:0},false); mk.fillStyle(0xffffff); mk.fillRoundedRect(x0,y0,w,h,22); bgi.setMask(mk.createGeometryMask());
+    const fr=this.add.graphics(); fr.lineStyle(3,0xffd27a,1); fr.strokeRoundedRect(x0,y0,w,h,22);
+    fr.fillStyle(0x000000,0.3); fr.fillRoundedRect(x0,y0,w,46,{tl:22,tr:22,bl:0,br:0});
+    txt(this,x0+18,y0+23,`${CONFIG.brand}  ×  Dussehra`,15,{bold:true,color:'#fde68a',ox:0});
+    txt(this,W/2,y0+84,'YOUR DUSSEHRA JOURNEY',24,{display:true,color:'#ffd27a'});
+    txt(this,W/2,y0+116,heroName(),18,{bold:true,color:'#fff3d6'});
+    txt(this,W/2,y0+144,`${n}/${TOTAL} Trials Complete`,15,{color:'#fde4cf'});
+    TRIALS.forEach((t,k)=>{ const col=k%2, row=Math.floor(k/2), x=x0+46+col*150, y=y0+200+row*58, ok=STATE.tokens.includes(t.key);
+      const g=this.add.graphics(); g.fillStyle(ok?0xf6a623:0x3a2350,1); g.fillCircle(x,y,15); drawSymbol(this,t.icon,x,y,9,ok?0xf6a623:0x3a2350).setAlpha(ok?1:0.4);
+      txt(this,x+24,y,`${t.value} ${ok?'✓':''}`,14,{bold:true,color:ok?'#fff3d6':'#7c6a8c',ox:0}); });
+    const by=y0+h-92; const bg=this.add.graphics(); bg.fillStyle(0x000000,0.35); bg.fillRoundedRect(x0+30,by-32,w-60,74,16);
+    drawSymbol(this,'bow',x0+64,by+5,18,0x1a0f2e);
+    txt(this,x0+96,by-4,n>=TOTAL?'DUSSEHRA CHAMPION':'ON THE JOURNEY',20,{display:true,color:'#ffd27a',ox:0}); txt(this,x0+96,by+20,'The Trials of Ravana',12,{color:'#fde4cf',ox:0});
+    button(this,W/2-82,692,150,48,'Share',()=>this.share(),{size:17});
+    button(this,W/2+82,692,150,48,'Done',()=>goTo(this,STATE.tokens.length>=TOTAL?'Champion':'Journey'),{size:16,color:0x3a2350,text:'#fff3d6'});
+    track('dussehra_share_card_viewed',{trials:n});
+  }
+  share(){
+    track('dussehra_share_clicked',{});
+    const text=`I completed ${STATE.tokens.length}/${TOTAL} Trials of Ravana on ${CONFIG.brand} this Dussehra! ${TRIALS.filter(t=>STATE.tokens.includes(t.key)).map(t=>t.value+' ✓').join(' ')}`;
+    const fallback=async()=>{ try{ if(navigator.share){ await navigator.share({title:'My Dussehra Journey',text}); return; } }catch(e){ if(e&&e.name==='AbortError') return; }
+      try{ await navigator.clipboard.writeText(text); toast(this,'Copied! Paste it anywhere to share.'); }catch(e){ toast(this,'Take a screenshot of your card to share it!'); } };
+    if(bridge('shareCard',{text})) return;
+    const {x0,y0,w,h}=this.card;
+    try{ this.game.renderer.snapshotArea(x0,y0,w,h,img=>{ try{ const cv=document.createElement('canvas'); cv.width=img.width; cv.height=img.height; cv.getContext('2d').drawImage(img,0,0);
+        cv.toBlob(async b=>{ try{ const f=new File([b],'dussehra-journey.png',{type:'image/png'}); if(navigator.canShare&&navigator.canShare({files:[f]})){ await navigator.share({files:[f],title:'My Dussehra Journey',text}); return; } }catch(e){ if(e&&e.name==='AbortError') return; } fallback(); },'image/png'); }catch(e){ fallback(); } }); }
+    catch(e){ fallback(); }
+  }
+}
+
+/* ---------- Boot the game once fonts are ready ---------- */
+function start(){
+  new Phaser.Game({
+    type:Phaser.AUTO, parent:'game', backgroundColor:'#0f0820',
+    scale:{ mode:Phaser.Scale.FIT, autoCenter:Phaser.Scale.CENTER_BOTH, width:W, height:H },
+    dom:{ createContainer:true },
+    scene:[Boot,AstroHome,Campaign,Intro,Journey,Celebration,Champion,Share],
+    input:{ activePointers:3 },
+  });
+}
+Promise.race([
+  Promise.all([document.fonts.load("38px 'Yatra One'"), document.fonts.load("bold 20px 'Baloo 2'"), document.fonts.load("20px 'Baloo 2'")]),
+  new Promise(r=>setTimeout(r,1800))
+]).catch(()=>{}).then(start);
+</script>
+</body>
+</html>
